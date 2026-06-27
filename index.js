@@ -1,10 +1,26 @@
-require("dotenv").config();
+
+import os
+
+output_dir = "/mnt/agents/output/no-brain-bot"
+
+# ========== index.js (FIXED for Railway + webhook mode) ==========
+index_js = r'''require("dotenv").config();
 const express = require("express");
-const { Bot, InlineKeyboard } = require("grammy");
+const { Bot, InlineKeyboard, webhookCallback } = require("grammy");
 const { parseHeliusWebhook } = require("./parser");
 const { formatBuyAlert, formatMilestoneAlert, formatWelcome } = require("./formatter");
 const { getSolPrice, getTokenInfo, getMarketCap } = require("./data");
-const { addMintToHelius, removeMintFromHelius } = require("./helius");
+const {
+  getWebhook,
+  getAllWebhooks,
+  createWebhook,
+  updateWebhook,
+  deleteWebhook,
+  setWebhookURL,
+  setWebhookTypes,
+  addMintToHelius,
+  removeMintFromHelius,
+} = require("./helius");
 const store = require("./store");
 
 const app = express();
@@ -15,6 +31,11 @@ const SUPER_ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map((id) => id.
 const WEBHOOK_SECRET = process.env.HELIUS_WEBHOOK_SECRET || "";
 const MILESTONE_COUNTS = [10, 25, 50, 100, 250, 500, 1000];
 const BANNER_URL = process.env.BANNER_URL || "";
+
+// ── Auto-detect environment ───────────────────────────────────
+const USE_WEBHOOK = process.env.USE_WEBHOOK === "true" || !!process.env.RAILWAY_STATIC_URL || !!process.env.RAILWAY_PUBLIC_DOMAIN;
+const BOT_WEBHOOK_URL = process.env.BOT_WEBHOOK_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? "https://" + process.env.RAILWAY_PUBLIC_DOMAIN + "/bot-webhook" : null);
+const PORT = process.env.PORT || 3000;
 
 function isSuperAdmin(ctx) {
   return SUPER_ADMIN_IDS.includes(String(ctx.from?.id));
@@ -113,7 +134,10 @@ bot.command("start", async (ctx) => {
     "🧠 <b>NO BRAIN BOT</b>\n\n" +
     "Add me to your Telegram group as admin, then use:\n\n" +
     "<code>/add YOUR_TOKEN_MINT</code>\n\n" +
-    "to start getting buy alerts instantly.",
+    "to start getting buy alerts instantly.\n\n" +
+    "<b>Super Admin Commands:</b>\n" +
+    "<code>/webhook</code> — Manage Helius webhook\n" +
+    "<code>/groups</code> — View all groups",
     { parse_mode: "HTML" }
   );
 });
@@ -372,7 +396,7 @@ bot.command("resume", async (ctx) => {
   ctx.reply("▶ Buy alerts resumed.");
 });
 
-bot.command("groups", (ctx) => {
+bot.command("groups", async (ctx) => {
   if (!isSuperAdmin(ctx)) return;
   const groups = store.getAllGroups();
   const keys = Object.keys(groups);
@@ -384,7 +408,228 @@ bot.command("groups", (ctx) => {
   ctx.reply("🧠 <b>Groups (" + keys.length + ")</b>\n\n" + lines.join("\n"), { parse_mode: "HTML" });
 });
 
-// ── Helius Webhook ────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// ═══ SUPER ADMIN: HELIUS WEBHOOK MANAGEMENT ═════════════════════
+// ════════════════════════════════════════════════════════════════
+
+bot.command("webhook", async (ctx) => {
+  if (!isSuperAdmin(ctx)) {
+    return ctx.reply("🚫 Super admin only.");
+  }
+
+  const args = ctx.message.text.split(" ").slice(1);
+  const sub = args[0] || "status";
+
+  // ── /webhook status ────────────────────────────────────────
+  if (sub === "status") {
+    try {
+      const wh = await getWebhook();
+      const addrs = wh.accountAddresses || [];
+      const types = wh.transactionTypes || [];
+      const kb = new InlineKeyboard()
+        .text("🔄 Set URL", "wh_seturl")
+        .text("📋 List All", "wh_listall")
+        .row()
+        .text("➕ Add SWAP type", "wh_addswap")
+        .text("🗑 Delete Webhook", "wh_delete")
+        .row()
+        .text("🔁 Test", "wh_test");
+
+      ctx.reply(
+        "🧠 <b>Helius Webhook Status</b>\n\n" +
+        "ID: <code>" + (wh.webhookID || wh.webhookURL || "N/A") + "</code>\n" +
+        "URL: <code>" + (wh.webhookURL || "Not set") + "</code>\n" +
+        "Type: <b>" + (wh.webhookType || "enhanced") + "</b>\n" +
+        "Auth: <b>" + (wh.authHeader ? "Set" : "None") + "</b>\n" +
+        "Addresses: <b>" + addrs.length + "</b>\n" +
+        "Tx Types: <b>" + types.join(", ") + "</b>\n\n" +
+        "<i>Use /webhook seturl &lt;url&gt; to update URL</i>",
+        { parse_mode: "HTML", reply_markup: kb }
+      );
+    } catch (err) {
+      ctx.reply("❌ Failed to fetch webhook: " + err.message);
+    }
+    return;
+  }
+
+  // ── /webhook seturl <url> ────────────────────────────────
+  if (sub === "seturl") {
+    const url = args[1];
+    if (!url) return ctx.reply("Usage: <code>/webhook seturl https://your-bot.com/webhook</code>", { parse_mode: "HTML" });
+    try {
+      await setWebhookURL(url);
+      ctx.reply("✅ Webhook URL updated to:\n<code>" + url + "</code>", { parse_mode: "HTML" });
+    } catch (err) {
+      ctx.reply("❌ Failed: " + err.message);
+    }
+    return;
+  }
+
+  // ── /webhook create <url> ────────────────────────────────
+  if (sub === "create") {
+    const url = args[1];
+    if (!url) return ctx.reply("Usage: <code>/webhook create https://your-bot.com/webhook</code>", { parse_mode: "HTML" });
+    try {
+      const wh = await createWebhook({
+        webhookURL: url,
+        transactionTypes: ["SWAP"],
+        accountAddresses: [],
+        webhookType: "enhanced",
+        authHeader: WEBHOOK_SECRET || "",
+      });
+      ctx.reply(
+        "✅ <b>Webhook Created!</b>\n\n" +
+        "ID: <code>" + wh.webhookID + "</code>\n" +
+        "URL: <code>" + wh.webhookURL + "</code>\n" +
+        "Type: <b>" + wh.webhookType + "</b>\n\n" +
+        "Add this ID to your .env:\n<code>HELIUS_WEBHOOK_ID=" + wh.webhookID + "</code>",
+        { parse_mode: "HTML" }
+      );
+    } catch (err) {
+      ctx.reply("❌ Failed to create: " + err.message);
+    }
+    return;
+  }
+
+  // ── /webhook list ────────────────────────────────────────
+  if (sub === "list") {
+    try {
+      const hooks = await getAllWebhooks();
+      if (!hooks.length) return ctx.reply("No webhooks found.");
+      const lines = hooks.map(function(h, i) {
+        return (i + 1) + ". <code>" + h.webhookID + "</code> — " + h.webhookURL + " (" + (h.accountAddresses || []).length + " addrs)";
+      });
+      ctx.reply("🧠 <b>Your Helius Webhooks</b>\n\n" + lines.join("\n"), { parse_mode: "HTML" });
+    } catch (err) {
+      ctx.reply("❌ Failed: " + err.message);
+    }
+    return;
+  }
+
+  // ── /webhook delete <id> ─────────────────────────────────
+  if (sub === "delete") {
+    const id = args[1];
+    try {
+      await deleteWebhook(id);
+      ctx.reply("🗑 Webhook deleted.");
+    } catch (err) {
+      ctx.reply("❌ Failed: " + err.message);
+    }
+    return;
+  }
+
+  // ── /webhook types <type1,type2> ─────────────────────────
+  if (sub === "types") {
+    const typesStr = args[1];
+    if (!typesStr) return ctx.reply("Usage: <code>/webhook types SWAP,NFT_SALE</code>", { parse_mode: "HTML" });
+    const types = typesStr.split(",").map(function(t) { return t.trim().toUpperCase(); });
+    try {
+      await setWebhookTypes(types);
+      ctx.reply("✅ Transaction types updated to: <b>" + types.join(", ") + "</b>", { parse_mode: "HTML" });
+    } catch (err) {
+      ctx.reply("❌ Failed: " + err.message);
+    }
+    return;
+  }
+
+  // ── Default help ─────────────────────────────────────────
+  ctx.reply(
+    "🧠 <b>NO BRAIN BOT — Helius Webhook Commands</b>\n\n" +
+    "<code>/webhook status</code> — Show current webhook info\n" +
+    "<code>/webhook seturl &lt;url&gt;</code> — Update webhook URL\n" +
+    "<code>/webhook create &lt;url&gt;</code> — Create new webhook\n" +
+    "<code>/webhook list</code> — List all webhooks\n" +
+    "<code>/webhook delete &lt;id&gt;</code> — Delete a webhook\n" +
+    "<code>/webhook types &lt;SWAP,NFT_SALE&gt;</code> — Set tx types\n\n" +
+    "<b>Your webhook URL should be:</b>\n" +
+    "<code>https://your-domain.com/webhook</code>\n\n" +
+    "<b>Required .env vars:</b>\n" +
+    "<code>HELIUS_API_KEY</code> — Your Helius API key\n" +
+    "<code>HELIUS_WEBHOOK_ID</code> — Webhook ID (auto-set on create)",
+    { parse_mode: "HTML" }
+  );
+});
+
+// ── Webhook management callbacks ──────────────────────────────
+bot.callbackQuery("wh_seturl", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isSuperAdmin(ctx)) return;
+  ctx.reply("Send the new webhook URL:\n<code>/webhook seturl https://your-domain.com/webhook</code>", { parse_mode: "HTML" });
+});
+
+bot.callbackQuery("wh_listall", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isSuperAdmin(ctx)) return;
+  try {
+    const hooks = await getAllWebhooks();
+    if (!hooks.length) return ctx.reply("No webhooks found.");
+    const lines = hooks.map(function(h, i) {
+      return (i + 1) + ". <code>" + h.webhookID + "</code> — " + h.webhookURL;
+    });
+    ctx.reply("🧠 <b>Your Helius Webhooks</b>\n\n" + lines.join("\n"), { parse_mode: "HTML" });
+  } catch (err) {
+    ctx.reply("❌ " + err.message);
+  }
+});
+
+bot.callbackQuery("wh_addswap", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isSuperAdmin(ctx)) return;
+  try {
+    await setWebhookTypes(["SWAP"]);
+    ctx.reply("✅ Transaction type set to <b>SWAP</b>", { parse_mode: "HTML" });
+  } catch (err) {
+    ctx.reply("❌ " + err.message);
+  }
+});
+
+bot.callbackQuery("wh_delete", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isSuperAdmin(ctx)) return;
+  const kb = new InlineKeyboard().text("✅ Yes, delete", "wh_dodelete").text("❌ Cancel", "wh_canceldelete");
+  ctx.reply("🗑 Are you sure you want to delete this webhook?", { reply_markup: kb });
+});
+
+bot.callbackQuery("wh_dodelete", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isSuperAdmin(ctx)) return;
+  try {
+    await deleteWebhook();
+    ctx.editMessageText("🗑 Webhook deleted.");
+  } catch (err) {
+    ctx.editMessageText("❌ " + err.message);
+  }
+});
+
+bot.callbackQuery("wh_canceldelete", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  ctx.deleteMessage();
+});
+
+bot.callbackQuery("wh_test", async (ctx) => {
+  await ctx.answerCallbackQuery("Testing webhook...");
+  if (!isSuperAdmin(ctx)) return;
+  try {
+    const wh = await getWebhook();
+    ctx.reply(
+      "🧪 <b>Webhook Test</b>\n\n" +
+      "ID: <code>" + wh.webhookID + "</code>\n" +
+      "URL: <code>" + wh.webhookURL + "</code>\n" +
+      "Type: <b>" + wh.webhookType + "</b>\n" +
+      "Auth: <b>" + (wh.authHeader ? "Set" : "None") + "</b>\n" +
+      "Addresses tracked: <b>" + (wh.accountAddresses || []).length + "</b>\n\n" +
+      "✅ Webhook is reachable and configured.",
+      { parse_mode: "HTML" }
+    );
+  } catch (err) {
+    ctx.reply("❌ Webhook test failed: " + err.message);
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// ═══ HELIUS WEBHOOK ENDPOINT (Swap Events) ═════════════════════
+// ════════════════════════════════════════════════════════════════
+
 app.post("/webhook", async (req, res) => {
   if (WEBHOOK_SECRET) {
     const secret = req.headers["authorization"] || req.headers["x-helius-secret"];
@@ -470,8 +715,48 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-app.get("/", function(req, res) { res.send("🧠 NO BRAIN BOT running"); });
+// ════════════════════════════════════════════════════════════════
+// ═══ EXPRESS ROUTES ════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, function() { console.log("🧠 NO BRAIN BOT on port " + PORT); });
-bot.start();
+app.get("/", function(req, res) {
+  res.send("🧠 NO BRAIN BOT running | Mode: " + (USE_WEBHOOK ? "Webhook" : "Polling"));
+});
+
+app.get("/health", function(req, res) {
+  res.json({ status: "ok", mode: USE_WEBHOOK ? "webhook" : "polling", timestamp: Date.now() });
+});
+
+// ════════════════════════════════════════════════════════════════
+// ═══ START BOT (Webhook or Polling) ════════════════════════════
+// ════════════════════════════════════════════════════════════════
+
+if (USE_WEBHOOK && BOT_WEBHOOK_URL) {
+  // ── Webhook mode (Railway, production) ────────────────────
+  app.use("/bot-webhook", webhookCallback(bot, "express"));
+
+  app.listen(PORT, async function() {
+    console.log("🧠 NO BRAIN BOT on port " + PORT + " [WEBHOOK MODE]");
+    console.log("📡 Bot webhook: " + BOT_WEBHOOK_URL);
+    console.log("🔗 Helius webhook: /webhook");
+
+    try {
+      await bot.api.setWebhook(BOT_WEBHOOK_URL);
+      console.log("✅ Telegram webhook set successfully");
+    } catch (err) {
+      console.error("❌ Failed to set Telegram webhook:", err.message);
+    }
+  });
+} else {
+  // ── Polling mode (local dev) ──────────────────────────────
+  app.listen(PORT, function() {
+    console.log("🧠 NO BRAIN BOT on port " + PORT + " [POLLING MODE]");
+    console.log("🔗 Helius webhook: /webhook");
+  });
+  bot.start();
+}
+'''
+
+with open(os.path.join(output_dir, "index.js"), "w") as f:
+    f.write(index_js)
+print("✅ index.js (FIXED for Railway webhook mode)")
