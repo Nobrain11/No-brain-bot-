@@ -1,0 +1,17 @@
+{
+  "name": "no-brain-bot",
+  "version": "4.0.0",
+  "description": "NO BRAIN BOT — Solana Buy Alert Bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "grammy": "^1.26.0"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
