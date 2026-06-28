@@ -57,7 +57,7 @@ function buildSettingsKeyboard(group) {
 function buildSettingsText(group) {
   const s = group.settings || {};
   return (
-    "<b>APEX Buy Bot Settings</b>\n\n" +
+    "<b>NO BRAIN Buy Bot Settings</b>\n\n" +
     "Token: <b>" + group.tokenName + " [" + group.tokenSymbol + "]</b>\n" +
     "CA: <code>" + group.mint + "</code>\n\n" +
     "Min Buy: <b>" + (s.minBuySol ?? 0.05) + " SOL</b>\n" +
@@ -88,14 +88,14 @@ bot.command("start", async (ctx) => {
     const group = store.getGroup(chatId);
     if (group && group.mint) {
       return ctx.reply(
-        "<b>APEX Buy Bot</b> is active!\n\nTracking: <b>" + group.tokenName + " [" + group.tokenSymbol + "]</b>\n\nUse /settings to customize.",
+        "<b>NO BRAIN Buy Bot</b> is active!\n\nTracking: <b>" + group.tokenName + " [" + group.tokenSymbol + "]</b>\n\nUse /settings to customize.",
         { parse_mode: "HTML" }
       );
     }
-    return ctx.reply("<b>APEX Buy Bot</b>\n\nSet your token:\n\n<code>/add YOUR_TOKEN_MINT</code>", { parse_mode: "HTML" });
+    return ctx.reply("<b>NO BRAIN Buy Bot</b>\n\nSet your token:\n\n<code>/add YOUR_TOKEN_MINT</code>", { parse_mode: "HTML" });
   }
   ctx.reply(
-    "<b>APEX Buy Bot</b>\n\nAdd me to your group as admin then use:\n\n<code>/add YOUR_TOKEN_MINT</code>",
+    "<b>NO BRAIN Buy Bot</b>\n\nAdd me to your group as admin then use:\n\n<code>/add YOUR_TOKEN_MINT</code>",
     { parse_mode: "HTML" }
   );
 });
@@ -122,6 +122,7 @@ bot.command("add", async (ctx) => {
     settings: { minBuySol: 0.05, whaleSol: 10, buyEmoji: "green", showPrice: true, bannerUrl: BANNER_URL },
   });
   store.addMintGroup(mint, chatId);
+  console.log("[ADD] Registered mint", mint, "for chat", chatId);
   ctx.reply(
     "CA set successfully!\n\nToken: <b>" + tokenName + " [" + tokenSymbol + "]</b>\nCA: <code>" + mint + "</code>\n\nBuy alerts are LIVE!\n\nUse /settings to customize.",
     { parse_mode: "HTML" }
@@ -244,29 +245,16 @@ bot.callbackQuery("cancel_unregister", async (ctx) => {
 });
 
 // ── X OAUTH COMMANDS ──────────────────────────────────────────
-
-// /connectx - send OAuth link privately
 bot.command("connectx", async (ctx) => {
   const userId = String(ctx.from.id);
   const authUrl = xauth.buildAuthUrl(userId);
-
-  if (isGroup(ctx)) {
-    // Send the link as a private DM button
-    const kb = new InlineKeyboard().url("Connect your X account", authUrl);
-    ctx.reply(
-      "Tap below to connect your X (Twitter) account privately. Once connected you can like, retweet, comment and follow directly from Telegram!",
-      { reply_markup: kb }
-    );
-  } else {
-    const kb = new InlineKeyboard().url("Connect X Account", authUrl);
-    ctx.reply(
-      "Tap below to connect your X account:",
-      { reply_markup: kb }
-    );
-  }
+  const kb = new InlineKeyboard().url("Connect your X account", authUrl);
+  ctx.reply(
+    "Tap below to connect your X (Twitter) account. Once connected you can like, retweet, comment and follow directly from Telegram raids!",
+    { reply_markup: kb }
+  );
 });
 
-// /xstatus - check if connected
 bot.command("xstatus", async (ctx) => {
   const userId = String(ctx.from.id);
   const user = xauth.getUser(userId);
@@ -277,7 +265,6 @@ bot.command("xstatus", async (ctx) => {
   }
 });
 
-// /disconnectx - unlink X account
 bot.command("disconnectx", async (ctx) => {
   const userId = String(ctx.from.id);
   if (!xauth.isConnected(userId)) return ctx.reply("No X account connected.");
@@ -286,36 +273,24 @@ bot.command("disconnectx", async (ctx) => {
 });
 
 // ── RAID COMMANDS ─────────────────────────────────────────────
-
-// /raid <link> [duration]
 bot.command("raid", async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply("Use this in your group.");
   if (!(await isGroupAdmin(ctx))) return ctx.reply("Admins only.");
-
   const parts = ctx.message.text.split(" ");
   const link = parts[1] ? parts[1].trim() : null;
   const duration = parts[2] ? parseInt(parts[2]) : 30;
-
   if (!link || !link.startsWith("http")) {
-    return ctx.reply(
-      "Usage: <code>/raid https://x.com/post/123 30</code>\n\nProvide a link and optional duration in minutes.",
-      { parse_mode: "HTML" }
-    );
+    return ctx.reply("Usage: <code>/raid https://x.com/post/123 30</code>", { parse_mode: "HTML" });
   }
-
   const chatId = String(ctx.chat.id);
   const existing = raid.getRaid(chatId);
   if (existing) raid.endRaid(chatId);
-
   const startedBy = ctx.from.first_name || ctx.from.username || "Admin";
   const newRaid = raid.startRaid(chatId, link, duration, startedBy);
   const msg = raid.formatRaidMessage(newRaid);
   const kb = raid.buildRaidKeyboard(newRaid.type, link, chatId);
-
   const sent = await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
   newRaid.messageId = sent.message_id;
-
-  // Auto end
   setTimeout(async function() {
     const currentRaid = raid.getRaid(chatId);
     if (currentRaid && currentRaid.startedAt === newRaid.startedAt) {
@@ -325,7 +300,6 @@ bot.command("raid", async (ctx) => {
   }, duration * 60 * 1000);
 });
 
-// /endraid
 bot.command("endraid", async (ctx) => {
   if (!isGroup(ctx) || !(await isGroupAdmin(ctx))) return ctx.reply("Admins only.");
   const chatId = String(ctx.chat.id);
@@ -335,7 +309,6 @@ bot.command("endraid", async (ctx) => {
   ctx.reply(raid.formatRaidStats(ended), { parse_mode: "HTML" });
 });
 
-// /raidstats
 bot.command("raidstats", async (ctx) => {
   const chatId = String(ctx.chat.id);
   const currentRaid = raid.getRaid(chatId);
@@ -343,13 +316,11 @@ bot.command("raidstats", async (ctx) => {
   ctx.reply(raid.formatRaidStats(currentRaid), { parse_mode: "HTML" });
 });
 
-// /raidlb
 bot.command("raidlb", async (ctx) => {
   const chatId = String(ctx.chat.id);
   ctx.reply(raid.formatLeaderboard(chatId), { parse_mode: "HTML" });
 });
 
-// /raiddone
 bot.command("raiddone", async (ctx) => {
   if (!isGroup(ctx)) return;
   const chatId = String(ctx.chat.id);
@@ -363,23 +334,18 @@ bot.command("raiddone", async (ctx) => {
 });
 
 // ── X Action Callbacks ────────────────────────────────────────
-
-// Like
 bot.callbackQuery(/^xlike:/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const chatId = ctx.callbackQuery.data.split(":")[1];
   const userId = String(ctx.from.id);
   const userName = ctx.from.first_name || "Unknown";
-
   if (!xauth.isConnected(userId)) {
     const authUrl = xauth.buildAuthUrl(userId);
     const kb = new InlineKeyboard().url("Connect X Account", authUrl);
-    return ctx.reply("Connect your X account first to perform actions!", { reply_markup: kb });
+    return ctx.reply("Connect your X account first!", { reply_markup: kb });
   }
-
   const currentRaid = raid.getRaid(chatId);
   if (!currentRaid) return ctx.reply("Raid has ended.");
-
   try {
     await xauth.likeTweet(userId, currentRaid.link);
     raid.recordTask(chatId, userId, "likes");
@@ -390,22 +356,18 @@ bot.callbackQuery(/^xlike:/, async (ctx) => {
   }
 });
 
-// Retweet
 bot.callbackQuery(/^xrt:/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const chatId = ctx.callbackQuery.data.split(":")[1];
   const userId = String(ctx.from.id);
   const userName = ctx.from.first_name || "Unknown";
-
   if (!xauth.isConnected(userId)) {
     const authUrl = xauth.buildAuthUrl(userId);
     const kb = new InlineKeyboard().url("Connect X Account", authUrl);
     return ctx.reply("Connect your X account first!", { reply_markup: kb });
   }
-
   const currentRaid = raid.getRaid(chatId);
   if (!currentRaid) return ctx.reply("Raid has ended.");
-
   try {
     await xauth.retweet(userId, currentRaid.link);
     raid.recordTask(chatId, userId, "retweets");
@@ -416,44 +378,34 @@ bot.callbackQuery(/^xrt:/, async (ctx) => {
   }
 });
 
-// Comment
 bot.callbackQuery(/^xcomment:/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const chatId = ctx.callbackQuery.data.split(":")[1];
   const userId = String(ctx.from.id);
-
   if (!xauth.isConnected(userId)) {
     const authUrl = xauth.buildAuthUrl(userId);
     const kb = new InlineKeyboard().url("Connect X Account", authUrl);
     return ctx.reply("Connect your X account first!", { reply_markup: kb });
   }
-
   const currentRaid = raid.getRaid(chatId);
   if (!currentRaid) return ctx.reply("Raid has ended.");
-
-  // Store awaiting comment for this user
   if (!currentRaid.awaitingComment) currentRaid.awaitingComment = {};
   currentRaid.awaitingComment[userId] = true;
-
-  ctx.reply("Reply to this message with your comment text and I will post it on X for you.");
+  ctx.reply("Reply with your comment text and I will post it on X for you.");
 });
 
-// Follow
 bot.callbackQuery(/^xfollow:/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const chatId = ctx.callbackQuery.data.split(":")[1];
   const userId = String(ctx.from.id);
   const userName = ctx.from.first_name || "Unknown";
-
   if (!xauth.isConnected(userId)) {
     const authUrl = xauth.buildAuthUrl(userId);
     const kb = new InlineKeyboard().url("Connect X Account", authUrl);
     return ctx.reply("Connect your X account first!", { reply_markup: kb });
   }
-
   const currentRaid = raid.getRaid(chatId);
   if (!currentRaid) return ctx.reply("Raid has ended.");
-
   try {
     await xauth.followUser(userId, currentRaid.link);
     raid.recordTask(chatId, userId, "follows");
@@ -464,7 +416,6 @@ bot.callbackQuery(/^xfollow:/, async (ctx) => {
   }
 });
 
-// Done button
 bot.callbackQuery(/^raid_done:/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const chatId = ctx.callbackQuery.data.split(":")[1];
@@ -473,18 +424,17 @@ bot.callbackQuery(/^raid_done:/, async (ctx) => {
   const currentRaid = raid.getRaid(chatId);
   if (!currentRaid) return ctx.reply("This raid has ended.");
   const result = raid.markDone(chatId, userId, userName, ["Done"]);
-  if (result === "already") return ctx.answerCallbackQuery({ text: "Already marked as done!", show_alert: true });
+  if (result === "already") return ctx.answerCallbackQuery({ text: "Already done!", show_alert: true });
   ctx.reply(userName + " completed the raid! Total raiders: " + currentRaid.doneMemberIds.length);
 });
 
-// ── Handle text (settings + comments) ────────────────────────
+// ── Handle text (settings + raid comments) ───────────────────
 bot.on("message:text", async (ctx) => {
   if (!isGroup(ctx)) return;
   const chatId = String(ctx.chat.id);
   const userId = String(ctx.from.id);
   const userName = ctx.from.first_name || "Unknown";
 
-  // Check if user is awaiting comment for raid
   const currentRaid = raid.getRaid(chatId);
   if (currentRaid && currentRaid.awaitingComment && currentRaid.awaitingComment[userId]) {
     delete currentRaid.awaitingComment[userId];
@@ -500,7 +450,6 @@ bot.on("message:text", async (ctx) => {
     return;
   }
 
-  // Settings input
   const group = store.getGroup(chatId);
   if (!group || !group.settings || !group.settings.awaitingInput) return;
   if (!(await isGroupAdmin(ctx))) return;
@@ -508,14 +457,12 @@ bot.on("message:text", async (ctx) => {
   const field = group.settings.awaitingInput;
   const text = ctx.message.text.trim();
   let value;
-
   if (field === "buyEmoji" || field === "bannerUrl") {
     value = text;
   } else {
     value = parseFloat(text);
     if (isNaN(value) || value < 0) return ctx.reply("Invalid value. Enter a number.");
   }
-
   store.updateGroupSetting(chatId, field, value);
   store.updateGroupSetting(chatId, "awaitingInput", null);
   ctx.reply("Updated! Use /settings to view.");
@@ -536,7 +483,7 @@ bot.command("stats", async (ctx) => {
 
 bot.command("help", (ctx) => {
   ctx.reply(
-    "<b>APEX Buy Bot Commands</b>\n\n" +
+    "<b>NO BRAIN Buy Bot Commands</b>\n\n" +
     "<b>Buy Alerts</b>\n" +
     "/add CA - Track token buys\n" +
     "/remove - Remove token\n" +
@@ -582,26 +529,16 @@ bot.command("groups", (ctx) => {
   ctx.reply("<b>Groups (" + keys.length + ")</b>\n\n" + lines.join("\n"), { parse_mode: "HTML" });
 });
 
-// ── OAuth Callback Route ──────────────────────────────────────
+// ── OAuth Callback ────────────────────────────────────────────
 app.get("/auth/callback", async (req, res) => {
-  const { code, state, error } = req.query;
-
-  if (error) {
-    return res.send("<h2>Authorization denied.</h2><p>You can close this window.</p>");
-  }
-
-  if (!code || !state) {
-    return res.send("<h2>Invalid request.</h2>");
-  }
-
+  const code = req.query.code;
+  const state = req.query.state;
+  const error = req.query.error;
+  if (error) return res.send("<h2>Authorization denied.</h2><p>Close this window.</p>");
+  if (!code || !state) return res.send("<h2>Invalid request.</h2>");
   try {
-    const { xUsername } = await xauth.exchangeCode(code, state);
-    res.send(
-      "<h2>X account connected!</h2>" +
-      "<p>Welcome <b>@" + xUsername + "</b>!</p>" +
-      "<p>You can now like, retweet, comment and follow directly from Telegram raids.</p>" +
-      "<p>Close this window and go back to Telegram.</p>"
-    );
+    const result = await xauth.exchangeCode(code, state);
+    res.send("<h2>X account connected!</h2><p>Welcome @" + result.xUsername + "!</p><p>Close this window and go back to Telegram.</p>");
   } catch (err) {
     console.error("OAuth callback error:", err.message);
     res.send("<h2>Connection failed.</h2><p>" + err.message + "</p><p>Try /connectx again.</p>");
@@ -617,27 +554,44 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   const events = req.body;
+  console.log("[WEBHOOK] Received", Array.isArray(events) ? events.length : 0, "events");
+
   if (!Array.isArray(events) || !events.length) return;
 
   const solPrice = await getSolPrice();
 
   for (const event of events) {
     try {
+      console.log("[WEBHOOK] Event type:", event.type, "signature:", event.signature ? event.signature.slice(0, 20) : "none");
+
       const buy = parseHeliusWebhook(event);
+      console.log("[WEBHOOK] Buy parsed:", buy ? "mint=" + buy.tokenMint + " sol=" + buy.solSpent : "null - not a buy");
+
       if (!buy) continue;
 
       const chatIds = store.getGroupsForMint(buy.tokenMint);
-      if (!chatIds.length) continue;
+      console.log("[WEBHOOK] ChatIds for mint", buy.tokenMint, ":", chatIds);
+
+      if (!chatIds.length) {
+        console.log("[WEBHOOK] No groups tracking this mint");
+        continue;
+      }
 
       for (const chatId of chatIds) {
         const group = store.getGroup(chatId);
+        console.log("[WEBHOOK] Group for chatId", chatId, ":", group ? "found active=" + group.active : "not found");
+
         if (!group || !group.active) continue;
 
         const s = group.settings || {};
         const minBuy = s.minBuySol ?? 0.05;
         const whaleSol = s.whaleSol ?? 10;
 
-        if (buy.solSpent !== null && buy.solSpent < minBuy) continue;
+        console.log("[WEBHOOK] solSpent:", buy.solSpent, "minBuy:", minBuy);
+        if (buy.solSpent !== null && buy.solSpent < minBuy) {
+          console.log("[WEBHOOK] Buy below minimum, skipping");
+          continue;
+        }
 
         const isWhale = buy.solSpent !== null && buy.solSpent >= whaleSol;
         const isNewHolder = !(group.uniqueBuyers || []).includes(buy.buyer);
@@ -656,14 +610,19 @@ app.post("/webhook", async (req, res) => {
         const msg = formatBuyAlert(buy, updatedGroup, solPrice, s, isWhale, isNewHolder, marketCap);
 
         const bannerUrl = s.bannerUrl || BANNER_URL;
+        console.log("[WEBHOOK] Sending alert to chatId", chatId, "bannerUrl:", bannerUrl ? "set" : "none");
+
         if (bannerUrl) {
           try {
             await bot.api.sendPhoto(chatId, bannerUrl, { caption: msg, parse_mode: "HTML", reply_markup: kb });
-          } catch {
+            console.log("[WEBHOOK] Photo alert sent successfully");
+          } catch (photoErr) {
+            console.log("[WEBHOOK] Photo failed, sending text:", photoErr.message);
             await bot.api.sendMessage(chatId, msg, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb });
           }
         } else {
           await bot.api.sendMessage(chatId, msg, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb });
+          console.log("[WEBHOOK] Text alert sent successfully");
         }
 
         const nextMilestoneIdx = updatedGroup.milestones || 0;
@@ -674,13 +633,13 @@ app.post("/webhook", async (req, res) => {
         }
       }
     } catch (err) {
-      console.error("Webhook error:", err.message);
+      console.error("[WEBHOOK] Error:", err.message);
     }
   }
 });
 
-app.get("/", function(req, res) { res.send("APEX Buy Bot running"); });
+app.get("/", function(req, res) { res.send("NO BRAIN Buy Bot running"); });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, function() { console.log("APEX Buy Bot on port " + PORT); });
+app.listen(PORT, function() { console.log("NO BRAIN Buy Bot on port " + PORT); });
 bot.start();
