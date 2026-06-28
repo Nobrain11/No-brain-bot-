@@ -640,6 +640,20 @@ app.post("/webhook", async (req, res) => {
 
 app.get("/", function(req, res) { res.send("NO BRAIN Buy Bot running"); });
 
+// ── Start ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, function() { console.log("NO BRAIN Buy Bot on port " + PORT); });
-bot.start();
+
+// Delay bot polling start to allow previous Railway instance to terminate
+console.log("[BOT] Waiting 5s for previous instance to exit...");
+setTimeout(async () => {
+  try {
+    await bot.start({
+      drop_pending_updates: true,
+      onStart: (info) => console.log("[BOT] Started as @" + info.username),
+    });
+  } catch (err) {
+    console.error("[BOT] Start error:", err.message);
+    process.exit(1);
+  }
+}, 5000);
