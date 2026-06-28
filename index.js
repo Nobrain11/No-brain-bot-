@@ -640,89 +640,141 @@ app.post("/webhook", async (req, res) => {
 
 app.get("/", function(req, res) { res.send("NO BRAIN Buy Bot running"); });
 
-// ── Buy Poller (fallback if webhooks not firing) ──────────────
+// ── Buy Poller (Helius RPC — reliable on free plan) ───────────
 const lastSigPerMint = {};
+const HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=" + (process.env.HELIUS_API_KEY || "");
+
+async function rpcCall(method, params) {
+  const res = await fetch(HELIUS_RPC_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: "poll", method, params }),
+    signal: AbortSignal.timeout(10000),
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch (e) { throw new Error("Non-JSON RPC: " + text.slice(0, 80)); }
+  if (data.error) throw new Error("RPC error: " + data.error.message);
+  return data.result;
+}
+
+async function sendBuyAlert(buy, chatId, solPrice) {
+  const group = store.getGroup(chatId);
+  if (!group || !group.active) return;
+  const s = group.settings || {};
+  const minBuy = s.minBuySol ?? 0.05;
+  const whaleSol = s.whaleSol ?? 10;
+  if (buy.solSpent !== null && buy.solSpent < minBuy) return;
+  const isWhale = buy.solSpent !== null && buy.solSpent >= whaleSol;
+  const isNewHolder = !(group.uniqueBuyers || []).includes(buy.buyer);
+  store.recordGroupBuy(chatId, buy.solSpent || 0, buy.buyer);
+  const updatedGroup = store.getGroup(chatId);
+  const marketCap = await getMarketCap(buy.tokenMint).catch(function() { return null; });
+  const buyUrl = "https://jup.ag/swap/SOL-" + buy.tokenMint;
+  const kb = new InlineKeyboard()
+    .url("Buy", buyUrl)
+    .url("Chart", "https://dexscreener.com/solana/" + buy.tokenMint)
+    .url("Bird", "https://birdeye.so/token/" + buy.tokenMint);
+  const msg = formatBuyAlert(buy, updatedGroup, solPrice, s, isWhale, isNewHolder, marketCap);
+  const bannerUrl = s.bannerUrl || BANNER_URL;
+  if (bannerUrl) {
+    try {
+      await bot.api.sendPhoto(chatId, bannerUrl, { caption: msg, parse_mode: "HTML", reply_markup: kb });
+    } catch {
+      await bot.api.sendMessage(chatId, msg, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb });
+    }
+  } else {
+    await bot.api.sendMessage(chatId, msg, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb });
+  }
+  const nextMilestoneIdx = updatedGroup.milestones || 0;
+  if (nextMilestoneIdx < MILESTONE_COUNTS.length && updatedGroup.totalBuys >= MILESTONE_COUNTS[nextMilestoneIdx]) {
+    const milestoneMsg = formatMilestoneAlert(updatedGroup, MILESTONE_COUNTS[nextMilestoneIdx], solPrice);
+    await bot.api.sendMessage(chatId, milestoneMsg, { parse_mode: "HTML" });
+    store.recordMilestone(chatId);
+  }
+}
 
 async function pollMintsForBuys() {
   const allGroups = store.getAllGroups();
-  const mints = [...new Set(Object.values(allGroups).map(g => g.mint).filter(Boolean))];
+  const mints = [...new Set(Object.values(allGroups).map(function(g) { return g.mint; }).filter(Boolean))];
   if (!mints.length) return;
-
-  const solPrice = await getSolPrice().catch(() => 0);
+  const solPrice = await getSolPrice().catch(function() { return 0; });
 
   for (const mint of mints) {
     try {
-      const url = "https://api.helius.xyz/v0/addresses/" + mint + "/transactions?api-key=" + process.env.HELIUS_API_KEY + "&limit=10&type=SWAP";
-      const res = await fetch(url);
-      const txs = await res.json();
-      if (!Array.isArray(txs) || !txs.length) continue;
+      const sigInfos = await rpcCall("getSignaturesForAddress", [mint, { limit: 10, commitment: "confirmed" }]);
+      if (!Array.isArray(sigInfos) || !sigInfos.length) continue;
 
       const lastSig = lastSigPerMint[mint];
-      let newTxs;
+      let newSigs;
       if (!lastSig) {
-        newTxs = [txs[0]];
+        newSigs = [sigInfos[0]];
       } else {
-        const idx = txs.findIndex(t => t.signature === lastSig);
-        newTxs = idx === -1 ? txs : txs.slice(0, idx);
+        const idx = sigInfos.findIndex(function(s) { return s.signature === lastSig; });
+        newSigs = idx === -1 ? sigInfos : sigInfos.slice(0, idx);
       }
-      lastSigPerMint[mint] = txs[0].signature;
-      if (!newTxs.length) continue;
+      lastSigPerMint[mint] = sigInfos[0].signature;
+      if (!newSigs.length) continue;
 
-      console.log("[POLL] " + newTxs.length + " new tx(s) for mint", mint);
+      console.log("[POLL] " + newSigs.length + " new tx(s) for", mint.slice(0, 8) + "...");
 
-      for (const tx of newTxs.reverse()) {
+      for (const sigInfo of newSigs.reverse()) {
         try {
-          const buy = parseHeliusWebhook(tx);
-          if (!buy) continue;
+          const tx = await rpcCall("getTransaction", [
+            sigInfo.signature,
+            { encoding: "jsonParsed", maxSupportedTransactionVersion: 0, commitment: "confirmed" }
+          ]);
+          if (!tx || !tx.meta) continue;
 
-          const chatIds = store.getGroupsForMint(buy.tokenMint);
-          if (!chatIds.length) continue;
+          const accountKeys = (tx.transaction && tx.transaction.message && tx.transaction.message.accountKeys) || [];
+          const buyer = accountKeys[0] ? (accountKeys[0].pubkey || String(accountKeys[0])) : "Unknown";
+          const preBalances = tx.meta.preBalances || [];
+          const postBalances = tx.meta.postBalances || [];
 
+          const nativeTransfers = [];
+          accountKeys.forEach(function(acc, i) {
+            const diff = (postBalances[i] || 0) - (preBalances[i] || 0);
+            const addr = acc.pubkey || String(acc);
+            if (diff < 0) nativeTransfers.push({ fromUserAccount: addr, toUserAccount: "", amount: Math.abs(diff) });
+            if (diff > 0) nativeTransfers.push({ fromUserAccount: "", toUserAccount: addr, amount: diff });
+          });
+
+          const preToken = tx.meta.preTokenBalances || [];
+          const postToken = tx.meta.postTokenBalances || [];
+          const tokenTransfers = [];
+          postToken.forEach(function(post) {
+            const pre = preToken.find(function(p) { return p.accountIndex === post.accountIndex && p.mint === post.mint; });
+            const preAmt = pre ? Number(pre.uiTokenAmount.amount) : 0;
+            const postAmt = Number(post.uiTokenAmount.amount);
+            const diff = postAmt - preAmt;
+            if (diff > 0) {
+              const ownerAcc = accountKeys[post.accountIndex];
+              const owner = ownerAcc ? (ownerAcc.pubkey || String(ownerAcc)) : "Unknown";
+              tokenTransfers.push({
+                mint: post.mint,
+                toUserAccount: owner,
+                tokenAmount: diff / Math.pow(10, post.uiTokenAmount.decimals),
+              });
+            }
+          });
+
+          const event = {
+            signature: sigInfo.signature,
+            feePayer: buyer,
+            timestamp: tx.blockTime || Math.floor(Date.now() / 1000),
+            nativeTransfers,
+            tokenTransfers,
+          };
+
+          const buy = parseHeliusWebhook(event);
+          if (!buy || buy.tokenMint !== mint) continue;
+
+          const chatIds = store.getGroupsForMint(mint);
           for (const chatId of chatIds) {
-            const group = store.getGroup(chatId);
-            if (!group || !group.active) continue;
-
-            const s = group.settings || {};
-            const minBuy = s.minBuySol ?? 0.05;
-            const whaleSol = s.whaleSol ?? 10;
-
-            if (buy.solSpent !== null && buy.solSpent < minBuy) continue;
-
-            const isWhale = buy.solSpent !== null && buy.solSpent >= whaleSol;
-            const isNewHolder = !(group.uniqueBuyers || []).includes(buy.buyer);
-
-            store.recordGroupBuy(chatId, buy.solSpent || 0, buy.buyer);
-            const updatedGroup = store.getGroup(chatId);
-
-            const marketCap = await getMarketCap(buy.tokenMint).catch(() => null);
-            const buyUrl = "https://jup.ag/swap/SOL-" + buy.tokenMint;
-            const kb = new InlineKeyboard()
-              .url("Buy", buyUrl)
-              .url("Buy", buyUrl)
-              .url("Buy", buyUrl);
-
-            const msg = formatBuyAlert(buy, updatedGroup, solPrice, s, isWhale, isNewHolder, marketCap);
-            const bannerUrl = s.bannerUrl || BANNER_URL;
-
-            if (bannerUrl) {
-              try {
-                await bot.api.sendPhoto(chatId, bannerUrl, { caption: msg, parse_mode: "HTML", reply_markup: kb });
-              } catch {
-                await bot.api.sendMessage(chatId, msg, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb });
-              }
-            } else {
-              await bot.api.sendMessage(chatId, msg, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb });
-            }
-
-            const nextMilestoneIdx = updatedGroup.milestones || 0;
-            if (nextMilestoneIdx < MILESTONE_COUNTS.length && updatedGroup.totalBuys >= MILESTONE_COUNTS[nextMilestoneIdx]) {
-              const milestoneMsg = formatMilestoneAlert(updatedGroup, MILESTONE_COUNTS[nextMilestoneIdx], solPrice);
-              await bot.api.sendMessage(chatId, milestoneMsg, { parse_mode: "HTML" });
-              store.recordMilestone(chatId);
-            }
+            await sendBuyAlert(buy, chatId, solPrice);
           }
         } catch (err) {
-          console.error("[POLL] tx error:", err.message);
+          console.error("[POLL] tx error:", sigInfo.signature.slice(0, 10), err.message);
         }
       }
     } catch (err) {
@@ -736,6 +788,7 @@ setTimeout(function() {
   pollMintsForBuys();
   setInterval(pollMintsForBuys, 30000);
 }, 10000);
+
 
 // ── Start ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
