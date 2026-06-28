@@ -114,7 +114,7 @@ bot.command("add", async (ctx) => {
   const tokenName = (info && info.name) ? info.name : mint.slice(0, 6);
   const tokenSymbol = (info && info.symbol) ? info.symbol : "???";
   const heliusOk = await addMintToHelius(mint);
-  if (!heliusOk) return ctx.reply("Failed to register with Helius.");
+  if (!heliusOk) console.warn("[ADD] Helius webhook skipped, polling will handle it.");
   store.updateGroup(chatId, {
     mint, tokenName, tokenSymbol, active: true,
     registeredAt: Date.now(), totalBuys: 0, totalVolumeSol: 0,
