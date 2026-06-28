@@ -17,6 +17,11 @@ const SUPER_ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map((id) => id.
 const WEBHOOK_SECRET = process.env.HELIUS_WEBHOOK_SECRET || "";
 const MILESTONE_COUNTS = [10, 25, 50, 100, 250, 500, 1000];
 const BANNER_URL = process.env.BANNER_URL || "";
+const BRAIN_CHANNEL = "-1004454130853";
+
+// ── DM Setup Wizard state (in-memory) ────────────────────────
+// wizardState[userId] = { chatId, groupName, tokenName, tokenSymbol, mint, step, settings }
+const wizardState = {};
 
 function isSuperAdmin(ctx) {
   return SUPER_ADMIN_IDS.includes(String(ctx.from?.id));
@@ -33,39 +38,137 @@ function isGroup(ctx) {
   return ["group", "supergroup"].includes(ctx.chat?.type);
 }
 
+function isDM(ctx) {
+  return ctx.chat?.type === "private";
+}
+
+// ── Settings keyboard ─────────────────────────────────────────
 function buildSettingsKeyboard(group) {
   const s = group.settings || {};
   const minBuy = s.minBuySol ?? 0.05;
   const whale = s.whaleSol ?? 10;
   const showPrice = s.showPrice !== false;
   const active = group.active;
+  const whaleAlert = s.whaleAlert !== false;
+  const trendingAlert = s.trendingAlert || false;
+  const ignoreMev = s.ignoreMev || false;
 
   return new InlineKeyboard()
     .text("Min Buy: " + minBuy + " SOL", "set_minbuy")
     .text("Whale: " + whale + " SOL", "set_whale")
     .row()
     .text("Set Emoji", "set_emoji")
-    .text("Set Banner", "set_banner")
+    .text("🖼 Buy Image", "set_banner")
     .row()
-    .text((showPrice ? "ON" : "OFF") + " Show Price", "toggle_price")
-    .text("Stats", "show_stats")
+    .text((showPrice ? "✅" : "⬜") + " Show Price", "toggle_price")
+    .text((whaleAlert ? "✅" : "⬜") + " Whale Alert", "toggle_whale_alert")
     .row()
-    .text(active ? "Pause Alerts" : "Resume Alerts", "toggle_active")
-    .text("Remove Token", "confirm_unregister");
+    .text((trendingAlert ? "✅" : "⬜") + " Trending", "toggle_trending")
+    .text((ignoreMev ? "✅" : "⬜") + " Ignore MEV", "toggle_mev")
+    .row()
+    .text("🔗 Set Links", "set_links")
+    .text("📊 Stats", "show_stats")
+    .row()
+    .text(active ? "⏸ Pause" : "▶️ Resume", "toggle_active")
+    .text("❌ Remove Token", "confirm_unregister");
 }
 
 function buildSettingsText(group) {
   const s = group.settings || {};
   return (
-    "<b>NO BRAIN Buy Bot Settings</b>\n\n" +
+    "<b>⚙️ NO BRAIN Buy Bot Settings</b>\n\n" +
     "Token: <b>" + group.tokenName + " [" + group.tokenSymbol + "]</b>\n" +
     "CA: <code>" + group.mint + "</code>\n\n" +
     "Min Buy: <b>" + (s.minBuySol ?? 0.05) + " SOL</b>\n" +
     "Whale Alert: <b>" + (s.whaleSol ?? 10) + " SOL</b>\n" +
     "Show Price: <b>" + (s.showPrice !== false ? "ON" : "OFF") + "</b>\n" +
-    "Alerts: <b>" + (group.active ? "Active" : "Paused") + "</b>\n\n" +
+    "Whale Alerts: <b>" + (s.whaleAlert !== false ? "ON" : "OFF") + "</b>\n" +
+    "Trending Alerts: <b>" + (s.trendingAlert ? "ON" : "OFF") + "</b>\n" +
+    "Ignore MEV: <b>" + (s.ignoreMev ? "ON" : "OFF") + "</b>\n" +
+    "Alerts: <b>" + (group.active ? "🟢 Active" : "🔴 Paused") + "</b>\n\n" +
     "<i>Tap a button to change settings</i>"
   );
+}
+
+// ── DM Wizard helpers ─────────────────────────────────────────
+function buildWizardKeyboard(step, settings) {
+  if (step === "confirm") {
+    return new InlineKeyboard()
+      .text("✅ Confirm & Post to Channel", "wizard_confirm")
+      .row()
+      .text("✏️ Edit Settings", "wizard_edit");
+  }
+  if (step === "layout") {
+    return new InlineKeyboard()
+      .text("Layout 1 — Classic", "wizard_layout_1")
+      .row()
+      .text("Layout 2 — Minimal", "wizard_layout_2")
+      .row()
+      .text("Layout 3 — Hype", "wizard_layout_3");
+  }
+  return null;
+}
+
+function buildWizardSummary(state) {
+  const s = state.settings || {};
+  return (
+    "<b>📋 Setup Summary</b>\n\n" +
+    "Token: <b>" + state.tokenName + " [" + state.tokenSymbol + "]</b>\n" +
+    "Group: <b>" + state.groupName + "</b>\n\n" +
+    "Min Buy: <b>" + (s.minBuySol || 0.05) + " SOL</b>\n" +
+    "Buy Emoji: <b>" + (s.buyEmoji || "🟢") + "</b>\n" +
+    "Show Price: <b>" + (s.showPrice !== false ? "ON" : "OFF") + "</b>\n" +
+    "Whale Alerts: <b>" + (s.whaleAlert !== false ? "ON" : "OFF") + "</b>\n" +
+    "Ignore MEV: <b>" + (s.ignoreMev ? "ON" : "OFF") + "</b>\n" +
+    "Layout: <b>" + (s.layout || 1) + "</b>\n" +
+    (s.tgLink ? "TG: " + s.tgLink + "\n" : "") +
+    (s.xLink ? "X: " + s.xLink + "\n" : "") +
+    (s.website ? "Web: " + s.website + "\n" : "") +
+    "\n<i>Tap Confirm to go live and post to Brain Bot Channel!</i>"
+  );
+}
+
+async function startWizard(userId, chatId, groupName, tokenName, tokenSymbol, mint) {
+  wizardState[userId] = {
+    chatId,
+    groupName,
+    tokenName,
+    tokenSymbol,
+    mint,
+    step: "image",
+    settings: { minBuySol: 0.05, buyEmoji: "🟢", showPrice: true, whaleAlert: true, ignoreMev: false, trendingAlert: false, layout: 1 },
+    bannerFileId: null,
+  };
+  try {
+    await bot.api.sendMessage(userId,
+      "<b>🧠 NO BRAIN Buy Bot Setup</b>\n\n" +
+      "Token added: <b>" + tokenName + " [" + tokenSymbol + "]</b>\n\n" +
+      "<b>Step 1/7 — Buy Image</b>\n\nSend your buy alert image (GIF or photo). This will show on every buy alert.\n\n<i>Or send /skip to use no image.</i>",
+      { parse_mode: "HTML" }
+    );
+  } catch (e) {
+    console.error("[WIZARD] Could not DM user:", e.message);
+  }
+}
+
+async function wizardNextStep(userId, step) {
+  const state = wizardState[userId];
+  if (!state) return;
+  state.step = step;
+
+  const steps = {
+    minbuy: "<b>Step 2/7 — Min Buy Amount</b>\n\nWhat is the minimum buy in SOL to show an alert?\n\nReply with a number (e.g. <code>0.05</code>)",
+    emoji: "<b>Step 3/7 — Buy Emoji</b>\n\nSend your buy emoji (e.g. 🟢 🚀 💎 🔥)\n\nThis fills the bar on each buy alert.",
+    tglink: "<b>Step 4/7 — Telegram Link</b>\n\nSend your group invite link (e.g. https://t.me/yourgroup)\n\n<i>Or /skip</i>",
+    xlink: "<b>Step 5/7 — X (Twitter) Link</b>\n\nSend your X profile link (e.g. https://x.com/yourtoken)\n\n<i>Or /skip</i>",
+    website: "<b>Step 6/7 — Website</b>\n\nSend your website URL\n\n<i>Or /skip</i>",
+    layout: "<b>Step 7/7 — Buy Alert Layout</b>\n\nChoose your buy alert style:",
+  };
+
+  if (steps[step]) {
+    const kb = step === "layout" ? buildWizardKeyboard("layout") : null;
+    await bot.api.sendMessage(userId, steps[step], { parse_mode: "HTML", reply_markup: kb || undefined });
+  }
 }
 
 // ── Bot joined a group ────────────────────────────────────────
@@ -79,6 +182,33 @@ bot.on("my_chat_member", async (ctx) => {
     await bot.api.sendMessage(chatId, formatWelcome(chatTitle), { parse_mode: "HTML" });
   }
   if (newStatus === "kicked" || newStatus === "left") store.removeGroup(chatId);
+});
+
+// ── Welcome new members ───────────────────────────────────────
+bot.on("chat_member", async (ctx) => {
+  const newMember = ctx.chatMember && ctx.chatMember.new_chat_member ? ctx.chatMember.new_chat_member : null;
+  if (!newMember || newMember.status !== "member") return;
+  const chatId = String(ctx.chat.id);
+  const group = store.getGroup(chatId);
+  if (!group) return;
+  const user = newMember.user;
+  const name = user.first_name + (user.last_name ? " " + user.last_name : "");
+  const s = group.settings || {};
+  const welcomeMsg =
+    "👋 Welcome <b>" + name + "</b> to <b>" + (ctx.chat.title || "the group") + "</b>!\n\n" +
+    (group.mint ? "We are tracking <b>" + group.tokenName + " [" + group.tokenSymbol + "]</b> 🚀\n\n" : "") +
+    (s.tgLink ? "📢 <a href='" + s.tgLink + "'>Join our TG</a>\n" : "") +
+    (s.xLink ? "🐦 <a href='" + s.xLink + "'>Follow on X</a>\n" : "") +
+    (s.website ? "🌐 <a href='" + s.website + "'>Website</a>\n" : "") +
+    "\n<i>Buy alerts are LIVE! 🔔</i>";
+
+  if (group.bannerFileId) {
+    try {
+      await bot.api.sendPhoto(chatId, group.bannerFileId, { caption: welcomeMsg, parse_mode: "HTML" });
+      return;
+    } catch (e) {}
+  }
+  await bot.api.sendMessage(chatId, welcomeMsg, { parse_mode: "HTML", disable_web_page_preview: true });
 });
 
 // ── /start ────────────────────────────────────────────────────
@@ -109,7 +239,7 @@ bot.command("add", async (ctx) => {
   const chatId = String(ctx.chat.id);
   const existing = store.getGroup(chatId);
   if (existing && existing.mint === mint) return ctx.reply("Already tracking this token.");
-  await ctx.reply("Validating token info...");
+  await ctx.reply("🔍 Validating token...");
   const info = await getTokenInfo(mint).catch(() => null);
   const tokenName = (info && info.name) ? info.name : mint.slice(0, 6);
   const tokenSymbol = (info && info.symbol) ? info.symbol : "???";
@@ -119,14 +249,20 @@ bot.command("add", async (ctx) => {
     mint, tokenName, tokenSymbol, active: true,
     registeredAt: Date.now(), totalBuys: 0, totalVolumeSol: 0,
     biggestBuy: 0, uniqueBuyers: [], milestones: 0,
-    settings: { minBuySol: 0.05, whaleSol: 10, buyEmoji: "green", showPrice: true, bannerUrl: BANNER_URL },
+    settings: { minBuySol: 0.05, whaleSol: 10, buyEmoji: "🟢", showPrice: true, whaleAlert: true, ignoreMev: false, trendingAlert: false, layout: 1 },
   });
   store.addMintGroup(mint, chatId);
   console.log("[ADD] Registered mint", mint, "for chat", chatId);
-  ctx.reply(
-    "CA set successfully!\n\nToken: <b>" + tokenName + " [" + tokenSymbol + "]</b>\nCA: <code>" + mint + "</code>\n\nBuy alerts are LIVE!\n\nUse /settings to customize.",
+
+  await ctx.reply(
+    "✅ <b>CA set successfully!</b>\n\nToken: <b>" + tokenName + " [" + tokenSymbol + "]</b>\nCA: <code>" + mint + "</code>\n\nBuy alerts are LIVE! 🚀\n\n<b>Check your DM to complete setup →</b>",
     { parse_mode: "HTML" }
   );
+
+  // Start DM wizard
+  const userId = String(ctx.from.id);
+  const groupName = ctx.chat.title || "your group";
+  await startWizard(userId, chatId, groupName, tokenName, tokenSymbol, mint);
 });
 
 // ── /remove ───────────────────────────────────────────────────
@@ -174,6 +310,39 @@ bot.callbackQuery("toggle_price", async (ctx) => {
   ctx.editMessageText(buildSettingsText(updated), { parse_mode: "HTML", reply_markup: buildSettingsKeyboard(updated) });
 });
 
+bot.callbackQuery("toggle_whale_alert", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const chatId = String(ctx.chat.id);
+  if (!(await isGroupAdmin(ctx))) return;
+  const group = store.getGroup(chatId);
+  if (!group) return;
+  store.updateGroupSetting(chatId, "whaleAlert", group.settings && group.settings.whaleAlert === false ? true : false);
+  const updated = store.getGroup(chatId);
+  ctx.editMessageText(buildSettingsText(updated), { parse_mode: "HTML", reply_markup: buildSettingsKeyboard(updated) });
+});
+
+bot.callbackQuery("toggle_trending", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const chatId = String(ctx.chat.id);
+  if (!(await isGroupAdmin(ctx))) return;
+  const group = store.getGroup(chatId);
+  if (!group) return;
+  store.updateGroupSetting(chatId, "trendingAlert", !(group.settings && group.settings.trendingAlert));
+  const updated = store.getGroup(chatId);
+  ctx.editMessageText(buildSettingsText(updated), { parse_mode: "HTML", reply_markup: buildSettingsKeyboard(updated) });
+});
+
+bot.callbackQuery("toggle_mev", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const chatId = String(ctx.chat.id);
+  if (!(await isGroupAdmin(ctx))) return;
+  const group = store.getGroup(chatId);
+  if (!group) return;
+  store.updateGroupSetting(chatId, "ignoreMev", !(group.settings && group.settings.ignoreMev));
+  const updated = store.getGroup(chatId);
+  ctx.editMessageText(buildSettingsText(updated), { parse_mode: "HTML", reply_markup: buildSettingsKeyboard(updated) });
+});
+
 bot.callbackQuery("set_minbuy", async (ctx) => {
   await ctx.answerCallbackQuery();
   const chatId = String(ctx.chat.id);
@@ -202,8 +371,16 @@ bot.callbackQuery("set_banner", async (ctx) => {
   await ctx.answerCallbackQuery();
   const chatId = String(ctx.chat.id);
   if (!(await isGroupAdmin(ctx))) return;
-  store.updateGroupSetting(chatId, "awaitingInput", "bannerUrl");
-  ctx.reply("Reply with your banner image URL (https://...)");
+  store.updateGroupSetting(chatId, "awaitingInput", "bannerPhoto");
+  ctx.reply("Send your buy alert image or GIF now.");
+});
+
+bot.callbackQuery("set_links", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const chatId = String(ctx.chat.id);
+  if (!(await isGroupAdmin(ctx))) return;
+  store.updateGroupSetting(chatId, "awaitingInput", "tgLink");
+  ctx.reply("Send your Telegram group link (e.g. https://t.me/yourgroup)\n\nOr /skip", { parse_mode: "HTML" });
 });
 
 bot.callbackQuery("show_stats", async (ctx) => {
@@ -244,13 +421,95 @@ bot.callbackQuery("cancel_unregister", async (ctx) => {
   ctx.deleteMessage();
 });
 
+// ── Wizard callbacks ──────────────────────────────────────────
+bot.callbackQuery(/^wizard_layout_/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = String(ctx.from.id);
+  const state = wizardState[userId];
+  if (!state) return;
+  const layout = parseInt(ctx.callbackQuery.data.replace("wizard_layout_", ""));
+  state.settings.layout = layout;
+  state.step = "confirm";
+  await ctx.reply(buildWizardSummary(state), {
+    parse_mode: "HTML",
+    reply_markup: buildWizardKeyboard("confirm"),
+  });
+});
+
+bot.callbackQuery("wizard_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = String(ctx.from.id);
+  const state = wizardState[userId];
+  if (!state) return ctx.reply("Setup expired. Run /add again in your group.");
+
+  // Save all wizard settings to group
+  const s = state.settings;
+  store.updateGroup(state.chatId, {
+    bannerFileId: state.bannerFileId || null,
+  });
+  store.updateGroupSetting(state.chatId, "minBuySol", s.minBuySol);
+  store.updateGroupSetting(state.chatId, "buyEmoji", s.buyEmoji);
+  store.updateGroupSetting(state.chatId, "showPrice", s.showPrice);
+  store.updateGroupSetting(state.chatId, "whaleAlert", s.whaleAlert);
+  store.updateGroupSetting(state.chatId, "ignoreMev", s.ignoreMev);
+  store.updateGroupSetting(state.chatId, "trendingAlert", s.trendingAlert);
+  store.updateGroupSetting(state.chatId, "layout", s.layout);
+  store.updateGroupSetting(state.chatId, "tgLink", s.tgLink || "");
+  store.updateGroupSetting(state.chatId, "xLink", s.xLink || "");
+  store.updateGroupSetting(state.chatId, "website", s.website || "");
+
+  // Build channel post
+  const group = store.getGroup(state.chatId);
+  const channelMsg =
+    "🆕 <b>New Token Listed!</b>\n\n" +
+    "Token: <b>" + state.tokenName + " [" + state.tokenSymbol + "]</b>\n" +
+    "CA: <code>" + state.mint + "</code>\n\n" +
+    (s.tgLink ? "📢 <a href='" + s.tgLink + "'>Telegram</a>  " : "") +
+    (s.xLink ? "🐦 <a href='" + s.xLink + "'>X / Twitter</a>  " : "") +
+    (s.website ? "🌐 <a href='" + s.website + "'>Website</a>" : "") +
+    "\n\n" +
+    "📊 <a href='https://dexscreener.com/solana/" + state.mint + "'>DexScreener</a>  " +
+    "🐦 <a href='https://birdeye.so/token/" + state.mint + "'>Birdeye</a>  " +
+    "🟡 <a href='https://jup.ag/swap/SOL-" + state.mint + "'>Buy on Jupiter</a>\n\n" +
+    "#solana #newlisting #nobrain";
+
+  try {
+    if (state.bannerFileId) {
+      await bot.api.sendPhoto(BRAIN_CHANNEL, state.bannerFileId, {
+        caption: channelMsg,
+        parse_mode: "HTML",
+      });
+    } else {
+      await bot.api.sendMessage(BRAIN_CHANNEL, channelMsg, {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+      });
+    }
+    await ctx.reply("✅ <b>Settings saved!</b>\n\nYour token is now listed in the Brain Bot Channel 🚀\n\nBuy alerts are LIVE in your group!", { parse_mode: "HTML" });
+  } catch (e) {
+    console.error("[WIZARD] Channel post error:", e.message);
+    await ctx.reply("✅ Settings saved! Could not post to channel: " + e.message);
+  }
+
+  delete wizardState[userId];
+});
+
+bot.callbackQuery("wizard_edit", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = String(ctx.from.id);
+  const state = wizardState[userId];
+  if (!state) return;
+  state.step = "image";
+  await ctx.reply("Let's redo setup. Send your buy image (or /skip):");
+});
+
 // ── X OAUTH COMMANDS ──────────────────────────────────────────
 bot.command("connectx", async (ctx) => {
   const userId = String(ctx.from.id);
   const authUrl = xauth.buildAuthUrl(userId);
   const kb = new InlineKeyboard().url("Connect your X account", authUrl);
   ctx.reply(
-    "Tap below to connect your X (Twitter) account. Once connected you can like, retweet, comment and follow directly from Telegram raids!",
+    "Tap below to connect your X (Twitter) account.",
     { reply_markup: kb }
   );
 });
@@ -428,36 +687,131 @@ bot.callbackQuery(/^raid_done:/, async (ctx) => {
   ctx.reply(userName + " completed the raid! Total raiders: " + currentRaid.doneMemberIds.length);
 });
 
-// ── Handle text (settings + raid comments) ───────────────────
+// ── Handle DM wizard messages ─────────────────────────────────
+bot.on("message", async (ctx, next) => {
+  if (!isDM(ctx)) return next();
+  const userId = String(ctx.from.id);
+  const state = wizardState[userId];
+  if (!state) return next();
+
+  const msg = ctx.message;
+  const text = msg.text ? msg.text.trim() : null;
+  const isSkip = text === "/skip";
+
+  if (state.step === "image") {
+    if (isSkip) {
+      state.bannerFileId = null;
+    } else if (msg.photo) {
+      state.bannerFileId = msg.photo[msg.photo.length - 1].file_id;
+      await ctx.reply("✅ Image saved!");
+    } else if (msg.animation) {
+      state.bannerFileId = msg.animation.file_id;
+      await ctx.reply("✅ GIF saved!");
+    } else {
+      return ctx.reply("Please send a photo or GIF, or type /skip");
+    }
+    await wizardNextStep(userId, "minbuy");
+    return;
+  }
+
+  if (state.step === "minbuy") {
+    if (!isSkip) {
+      const val = parseFloat(text);
+      if (isNaN(val) || val < 0) return ctx.reply("Enter a valid number (e.g. 0.05)");
+      state.settings.minBuySol = val;
+    }
+    await wizardNextStep(userId, "emoji");
+    return;
+  }
+
+  if (state.step === "emoji") {
+    if (!isSkip && text) state.settings.buyEmoji = text;
+    await wizardNextStep(userId, "tglink");
+    return;
+  }
+
+  if (state.step === "tglink") {
+    if (!isSkip && text) state.settings.tgLink = text;
+    await wizardNextStep(userId, "xlink");
+    return;
+  }
+
+  if (state.step === "xlink") {
+    if (!isSkip && text) state.settings.xLink = text;
+    await wizardNextStep(userId, "website");
+    return;
+  }
+
+  if (state.step === "website") {
+    if (!isSkip && text) state.settings.website = text;
+    await wizardNextStep(userId, "layout");
+    return;
+  }
+
+  return next();
+});
+
+// ── Handle group text (settings + raid comments) ──────────────
 bot.on("message:text", async (ctx) => {
-  if (!isGroup(ctx)) return;
+  if (isDM(ctx)) return;
   const chatId = String(ctx.chat.id);
   const userId = String(ctx.from.id);
   const userName = ctx.from.first_name || "Unknown";
 
-  const currentRaid = raid.getRaid(chatId);
-  if (currentRaid && currentRaid.awaitingComment && currentRaid.awaitingComment[userId]) {
-    delete currentRaid.awaitingComment[userId];
-    const commentText = ctx.message.text.trim();
-    try {
-      await xauth.commentTweet(userId, currentRaid.link, commentText);
-      raid.recordTask(chatId, userId, "comments");
-      raid.markDone(chatId, userId, userName, ["Comment"]);
-      ctx.reply(userName + " commented on the tweet!");
-    } catch (err) {
-      ctx.reply("Failed to post comment: " + err.message);
+  // Raid comment handling
+  if (isGroup(ctx)) {
+    const currentRaid = raid.getRaid(chatId);
+    if (currentRaid && currentRaid.awaitingComment && currentRaid.awaitingComment[userId]) {
+      delete currentRaid.awaitingComment[userId];
+      const commentText = ctx.message.text.trim();
+      try {
+        await xauth.commentTweet(userId, currentRaid.link, commentText);
+        raid.recordTask(chatId, userId, "comments");
+        raid.markDone(chatId, userId, userName, ["Comment"]);
+        ctx.reply(userName + " commented on the tweet!");
+      } catch (err) {
+        ctx.reply("Failed to post comment: " + err.message);
+      }
+      return;
     }
-    return;
   }
 
+  // Group settings input
   const group = store.getGroup(chatId);
   if (!group || !group.settings || !group.settings.awaitingInput) return;
   if (!(await isGroupAdmin(ctx))) return;
 
   const field = group.settings.awaitingInput;
   const text = ctx.message.text.trim();
+
+  if (text === "/skip") {
+    store.updateGroupSetting(chatId, "awaitingInput", null);
+    ctx.reply("Skipped.");
+    return;
+  }
+
+  // Chain link inputs
+  if (field === "tgLink") {
+    store.updateGroupSetting(chatId, "tgLink", text);
+    store.updateGroupSetting(chatId, "awaitingInput", "xLink");
+    ctx.reply("Got it! Now send your X link (or /skip):");
+    return;
+  }
+  if (field === "xLink") {
+    store.updateGroupSetting(chatId, "xLink", text);
+    store.updateGroupSetting(chatId, "awaitingInput", "website");
+    ctx.reply("Got it! Now send your website URL (or /skip):");
+    return;
+  }
+  if (field === "website") {
+    store.updateGroupSetting(chatId, "website", text);
+    store.updateGroupSetting(chatId, "awaitingInput", null);
+    ctx.reply("✅ Links saved!");
+    return;
+  }
+
   let value;
-  if (field === "buyEmoji" || field === "bannerUrl") {
+  if (field === "buyEmoji") {
     value = text;
   } else {
     value = parseFloat(text);
@@ -465,7 +819,32 @@ bot.on("message:text", async (ctx) => {
   }
   store.updateGroupSetting(chatId, field, value);
   store.updateGroupSetting(chatId, "awaitingInput", null);
-  ctx.reply("Updated! Use /settings to view.");
+  ctx.reply("✅ Updated! Use /settings to view.");
+});
+
+// ── Handle photo in group (for banner update via settings) ────
+bot.on("message:photo", async (ctx) => {
+  if (isDM(ctx)) return;
+  const chatId = String(ctx.chat.id);
+  const group = store.getGroup(chatId);
+  if (!group || !group.settings || group.settings.awaitingInput !== "bannerPhoto") return;
+  if (!(await isGroupAdmin(ctx))) return;
+  const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+  store.updateGroup(chatId, { bannerFileId: fileId });
+  store.updateGroupSetting(chatId, "awaitingInput", null);
+  ctx.reply("✅ Buy image updated!");
+});
+
+bot.on("message:animation", async (ctx) => {
+  if (isDM(ctx)) return;
+  const chatId = String(ctx.chat.id);
+  const group = store.getGroup(chatId);
+  if (!group || !group.settings || group.settings.awaitingInput !== "bannerPhoto") return;
+  if (!(await isGroupAdmin(ctx))) return;
+  const fileId = ctx.message.animation.file_id;
+  store.updateGroup(chatId, { bannerFileId: fileId });
+  store.updateGroupSetting(chatId, "awaitingInput", null);
+  ctx.reply("✅ Buy GIF updated!");
 });
 
 // ── Public commands ───────────────────────────────────────────
@@ -552,85 +931,17 @@ app.post("/webhook", async (req, res) => {
     if (secret !== WEBHOOK_SECRET) return res.sendStatus(401);
   }
   res.sendStatus(200);
-
   const events = req.body;
-  console.log("[WEBHOOK] Received", Array.isArray(events) ? events.length : 0, "events");
-
   if (!Array.isArray(events) || !events.length) return;
-
   const solPrice = await getSolPrice();
-
   for (const event of events) {
     try {
-      console.log("[WEBHOOK] Event type:", event.type, "signature:", event.signature ? event.signature.slice(0, 20) : "none");
-
       const buy = parseHeliusWebhook(event);
-      console.log("[WEBHOOK] Buy parsed:", buy ? "mint=" + buy.tokenMint + " sol=" + buy.solSpent : "null - not a buy");
-
       if (!buy) continue;
-
       const chatIds = store.getGroupsForMint(buy.tokenMint);
-      console.log("[WEBHOOK] ChatIds for mint", buy.tokenMint, ":", chatIds);
-
-      if (!chatIds.length) {
-        console.log("[WEBHOOK] No groups tracking this mint");
-        continue;
-      }
-
+      if (!chatIds.length) continue;
       for (const chatId of chatIds) {
-        const group = store.getGroup(chatId);
-        console.log("[WEBHOOK] Group for chatId", chatId, ":", group ? "found active=" + group.active : "not found");
-
-        if (!group || !group.active) continue;
-
-        const s = group.settings || {};
-        const minBuy = s.minBuySol ?? 0.05;
-        const whaleSol = s.whaleSol ?? 10;
-
-        console.log("[WEBHOOK] solSpent:", buy.solSpent, "minBuy:", minBuy);
-        if (buy.solSpent !== null && buy.solSpent < minBuy) {
-          console.log("[WEBHOOK] Buy below minimum, skipping");
-          continue;
-        }
-
-        const isWhale = buy.solSpent !== null && buy.solSpent >= whaleSol;
-        const isNewHolder = !(group.uniqueBuyers || []).includes(buy.buyer);
-
-        store.recordGroupBuy(chatId, buy.solSpent || 0, buy.buyer);
-        const updatedGroup = store.getGroup(chatId);
-
-        const marketCap = await getMarketCap(buy.tokenMint).catch(() => null);
-
-        const buyUrl = "https://jup.ag/swap/SOL-" + buy.tokenMint;
-        const kb = new InlineKeyboard()
-          .url("Buy", buyUrl)
-          .url("Buy", buyUrl)
-          .url("Buy", buyUrl);
-
-        const msg = formatBuyAlert(buy, updatedGroup, solPrice, s, isWhale, isNewHolder, marketCap);
-
-        const bannerUrl = s.bannerUrl || BANNER_URL;
-        console.log("[WEBHOOK] Sending alert to chatId", chatId, "bannerUrl:", bannerUrl ? "set" : "none");
-
-        if (bannerUrl) {
-          try {
-            await bot.api.sendPhoto(chatId, bannerUrl, { caption: msg, parse_mode: "HTML", reply_markup: kb });
-            console.log("[WEBHOOK] Photo alert sent successfully");
-          } catch (photoErr) {
-            console.log("[WEBHOOK] Photo failed, sending text:", photoErr.message);
-            await bot.api.sendMessage(chatId, msg, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb });
-          }
-        } else {
-          await bot.api.sendMessage(chatId, msg, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb });
-          console.log("[WEBHOOK] Text alert sent successfully");
-        }
-
-        const nextMilestoneIdx = updatedGroup.milestones || 0;
-        if (nextMilestoneIdx < MILESTONE_COUNTS.length && updatedGroup.totalBuys >= MILESTONE_COUNTS[nextMilestoneIdx]) {
-          const milestoneMsg = formatMilestoneAlert(updatedGroup, MILESTONE_COUNTS[nextMilestoneIdx], solPrice);
-          await bot.api.sendMessage(chatId, milestoneMsg, { parse_mode: "HTML" });
-          store.recordMilestone(chatId);
-        }
+        await sendBuyAlert(buy, chatId, solPrice);
       }
     } catch (err) {
       console.error("[WEBHOOK] Error:", err.message);
@@ -664,20 +975,36 @@ async function sendBuyAlert(buy, chatId, solPrice) {
   const s = group.settings || {};
   const minBuy = s.minBuySol ?? 0.05;
   const whaleSol = s.whaleSol ?? 10;
+
+  // Ignore MEV bots (very small buys from program accounts)
+  if (s.ignoreMev && buy.solSpent !== null && buy.solSpent < 0.001) return;
+
   if (buy.solSpent !== null && buy.solSpent < minBuy) return;
   const isWhale = buy.solSpent !== null && buy.solSpent >= whaleSol;
   const isNewHolder = !(group.uniqueBuyers || []).includes(buy.buyer);
   store.recordGroupBuy(chatId, buy.solSpent || 0, buy.buyer);
   const updatedGroup = store.getGroup(chatId);
   const marketCap = await getMarketCap(buy.tokenMint).catch(function() { return null; });
+
   const buyUrl = "https://jup.ag/swap/SOL-" + buy.tokenMint;
   const kb = new InlineKeyboard()
-    .url("Buy", buyUrl)
-    .url("Chart", "https://dexscreener.com/solana/" + buy.tokenMint)
-    .url("Bird", "https://birdeye.so/token/" + buy.tokenMint);
+    .url("🟢 Buy", buyUrl)
+    .url("📊 Chart", "https://dexscreener.com/solana/" + buy.tokenMint)
+    .url("🐦 Bird", "https://birdeye.so/token/" + buy.tokenMint);
+
   const msg = formatBuyAlert(buy, updatedGroup, solPrice, s, isWhale, isNewHolder, marketCap);
+
+  // Use stored file_id banner if available, else URL banner
+  const bannerFileId = group.bannerFileId || null;
   const bannerUrl = s.bannerUrl || BANNER_URL;
-  if (bannerUrl) {
+
+  if (bannerFileId) {
+    try {
+      await bot.api.sendPhoto(chatId, bannerFileId, { caption: msg, parse_mode: "HTML", reply_markup: kb });
+    } catch {
+      await bot.api.sendMessage(chatId, msg, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb });
+    }
+  } else if (bannerUrl) {
     try {
       await bot.api.sendPhoto(chatId, bannerUrl, { caption: msg, parse_mode: "HTML", reply_markup: kb });
     } catch {
@@ -686,6 +1013,15 @@ async function sendBuyAlert(buy, chatId, solPrice) {
   } else {
     await bot.api.sendMessage(chatId, msg, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb });
   }
+
+  // Whale alert
+  if (isWhale && s.whaleAlert !== false) {
+    await bot.api.sendMessage(chatId,
+      "🐳 <b>WHALE ALERT!</b>\n\n" + buy.buyer.slice(0, 6) + "..." + buy.buyer.slice(-4) + " just bought <b>" + (buy.solSpent || 0).toFixed(2) + " SOL</b> of " + group.tokenName + "!",
+      { parse_mode: "HTML" }
+    );
+  }
+
   const nextMilestoneIdx = updatedGroup.milestones || 0;
   if (nextMilestoneIdx < MILESTONE_COUNTS.length && updatedGroup.totalBuys >= MILESTONE_COUNTS[nextMilestoneIdx]) {
     const milestoneMsg = formatMilestoneAlert(updatedGroup, MILESTONE_COUNTS[nextMilestoneIdx], solPrice);
@@ -789,12 +1125,10 @@ setTimeout(function() {
   setInterval(pollMintsForBuys, 30000);
 }, 10000);
 
-
 // ── Start ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, function() { console.log("NO BRAIN Buy Bot on port " + PORT); });
 
-// Delay bot polling start to allow previous Railway instance to terminate
 console.log("[BOT] Waiting 5s for previous instance to exit...");
 setTimeout(async () => {
   try {
