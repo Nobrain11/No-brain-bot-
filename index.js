@@ -642,7 +642,7 @@ app.get("/", function(req, res) { res.send("NO BRAIN Buy Bot running"); });
 
 // ── Buy Poller (Helius RPC — reliable on free plan) ───────────
 const lastSigPerMint = {};
-const HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=" + (process.env.HELIUS_API_KEY || "");
+const HELIUS_RPC_URL = process.env.SOLANA_RPC || "https://api.mainnet-beta.solana.com";
 
 async function rpcCall(method, params) {
   const res = await fetch(HELIUS_RPC_URL, {
