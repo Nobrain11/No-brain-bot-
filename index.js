@@ -640,6 +640,103 @@ app.post("/webhook", async (req, res) => {
 
 app.get("/", function(req, res) { res.send("NO BRAIN Buy Bot running"); });
 
+// ── Buy Poller (fallback if webhooks not firing) ──────────────
+const lastSigPerMint = {};
+
+async function pollMintsForBuys() {
+  const allGroups = store.getAllGroups();
+  const mints = [...new Set(Object.values(allGroups).map(g => g.mint).filter(Boolean))];
+  if (!mints.length) return;
+
+  const solPrice = await getSolPrice().catch(() => 0);
+
+  for (const mint of mints) {
+    try {
+      const url = "https://api.helius.xyz/v0/addresses/" + mint + "/transactions?api-key=" + process.env.HELIUS_API_KEY + "&limit=10&type=SWAP";
+      const res = await fetch(url);
+      const txs = await res.json();
+      if (!Array.isArray(txs) || !txs.length) continue;
+
+      const lastSig = lastSigPerMint[mint];
+      let newTxs;
+      if (!lastSig) {
+        newTxs = [txs[0]];
+      } else {
+        const idx = txs.findIndex(t => t.signature === lastSig);
+        newTxs = idx === -1 ? txs : txs.slice(0, idx);
+      }
+      lastSigPerMint[mint] = txs[0].signature;
+      if (!newTxs.length) continue;
+
+      console.log("[POLL] " + newTxs.length + " new tx(s) for mint", mint);
+
+      for (const tx of newTxs.reverse()) {
+        try {
+          const buy = parseHeliusWebhook(tx);
+          if (!buy) continue;
+
+          const chatIds = store.getGroupsForMint(buy.tokenMint);
+          if (!chatIds.length) continue;
+
+          for (const chatId of chatIds) {
+            const group = store.getGroup(chatId);
+            if (!group || !group.active) continue;
+
+            const s = group.settings || {};
+            const minBuy = s.minBuySol ?? 0.05;
+            const whaleSol = s.whaleSol ?? 10;
+
+            if (buy.solSpent !== null && buy.solSpent < minBuy) continue;
+
+            const isWhale = buy.solSpent !== null && buy.solSpent >= whaleSol;
+            const isNewHolder = !(group.uniqueBuyers || []).includes(buy.buyer);
+
+            store.recordGroupBuy(chatId, buy.solSpent || 0, buy.buyer);
+            const updatedGroup = store.getGroup(chatId);
+
+            const marketCap = await getMarketCap(buy.tokenMint).catch(() => null);
+            const buyUrl = "https://jup.ag/swap/SOL-" + buy.tokenMint;
+            const kb = new InlineKeyboard()
+              .url("Buy", buyUrl)
+              .url("Buy", buyUrl)
+              .url("Buy", buyUrl);
+
+            const msg = formatBuyAlert(buy, updatedGroup, solPrice, s, isWhale, isNewHolder, marketCap);
+            const bannerUrl = s.bannerUrl || BANNER_URL;
+
+            if (bannerUrl) {
+              try {
+                await bot.api.sendPhoto(chatId, bannerUrl, { caption: msg, parse_mode: "HTML", reply_markup: kb });
+              } catch {
+                await bot.api.sendMessage(chatId, msg, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb });
+              }
+            } else {
+              await bot.api.sendMessage(chatId, msg, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb });
+            }
+
+            const nextMilestoneIdx = updatedGroup.milestones || 0;
+            if (nextMilestoneIdx < MILESTONE_COUNTS.length && updatedGroup.totalBuys >= MILESTONE_COUNTS[nextMilestoneIdx]) {
+              const milestoneMsg = formatMilestoneAlert(updatedGroup, MILESTONE_COUNTS[nextMilestoneIdx], solPrice);
+              await bot.api.sendMessage(chatId, milestoneMsg, { parse_mode: "HTML" });
+              store.recordMilestone(chatId);
+            }
+          }
+        } catch (err) {
+          console.error("[POLL] tx error:", err.message);
+        }
+      }
+    } catch (err) {
+      console.error("[POLL] mint error:", err.message);
+    }
+  }
+}
+
+// Start polling after 10s, then every 30s
+setTimeout(function() {
+  pollMintsForBuys();
+  setInterval(pollMintsForBuys, 30000);
+}, 10000);
+
 // ── Start ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, function() { console.log("NO BRAIN Buy Bot on port " + PORT); });
