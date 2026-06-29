@@ -1,165 +1,156 @@
 /**
- * raid.js
- * Handles Twitter/X and Telegram raids with OAuth actions.
+ * raid.js - Full Raidar-style raid system
  */
-
 const { InlineKeyboard } = require("grammy");
-const xauth = require("./xauth");
 
-const activeRaids = {};
-const raidHistory = {};
+const activeRaids = {};   // chatId -> raidData
+const raidHistory = {};   // chatId -> [raidData]
+const raidQueue = {};     // chatId -> [{ link, targets }]
+const pendingTargets = {}; // chatId -> { link, targets: {} } being set up
 
-function detectRaidType(link) {
+function detectType(link) {
   if (link.includes("twitter.com") || link.includes("x.com")) return "twitter";
   if (link.includes("t.me") || link.includes("telegram.me")) return "telegram";
   return "general";
 }
 
-function getRaidTypeLabel(type) {
-  if (type === "twitter") return "Twitter/X Raid";
-  if (type === "telegram") return "Telegram Raid";
-  return "Raid";
+// ── Keyboards ─────────────────────────────────────────────────
+
+function raidOptionsKeyboard(chatId) {
+  return new InlineKeyboard()
+    .text("⚡️ Start Raid ⚡️", "raid_start:" + chatId)
+    .row()
+    .text("🎯 Targets", "raid_targets:" + chatId)
+    .row()
+    .text("🔒 Lock Chat 🔴", "raid_lock:" + chatId)
+    .row()
+    .text("📓 Close", "raid_close:" + chatId);
 }
 
-function buildRaidKeyboard(type, link, chatId) {
-  const kb = new InlineKeyboard();
-
-  if (type === "twitter") {
-    kb.text("Like", "xlike:" + chatId)
-      .text("Retweet", "xrt:" + chatId)
-      .row()
-      .text("Comment", "xcomment:" + chatId)
-      .text("Follow", "xfollow:" + chatId)
-      .row();
-  } else if (type === "telegram") {
-    kb.url("Open Post", link).row();
-  } else {
-    kb.url("Open Link", link).row();
-  }
-
-  kb.text("Done!", "raid_done:" + chatId);
-  return kb;
+function targetsKeyboard(chatId) {
+  const pt = pendingTargets[chatId] || {};
+  const t = pt.targets || {};
+  return new InlineKeyboard()
+    .text("❤️ Likes: " + (t.likes || 0), "target_likes:" + chatId)
+    .row()
+    .text("🔄 Retweets: " + (t.retweets || 0), "target_retweets:" + chatId)
+    .row()
+    .text("💬 Replies: " + (t.replies || 0), "target_replies:" + chatId)
+    .row()
+    .text("✅ Save Targets", "target_save:" + chatId)
+    .row()
+    .text("⬅️ Back", "raid_back:" + chatId);
 }
 
-function formatRaidMessage(raid) {
-  const type = getRaidTypeLabel(raid.type);
-  const elapsed = Math.floor((Date.now() - raid.startedAt) / 60000);
-  const remaining = Math.max(0, raid.durationMinutes - elapsed);
-  const doneCount = raid.doneMemberIds.length;
-
-  let lines = [];
-  lines.push("RAID STARTED!");
-  lines.push("");
-  lines.push("Type: <b>" + type + "</b>");
-  lines.push("Link: " + raid.link);
-  lines.push("");
-
-  if (raid.type === "twitter") {
-    lines.push("<b>Tasks:</b>");
-    lines.push("1. Like the post");
-    lines.push("2. Retweet");
-    lines.push("3. Leave a comment");
-    lines.push("4. Follow the account");
-    lines.push("");
-    lines.push("<b>Connect your X account first:</b>");
-    lines.push("/connectx - Link your X account");
-    lines.push("");
-    lines.push("Then tap the buttons below to complete tasks directly from Telegram!");
-  } else {
-    lines.push("<b>Tasks:</b>");
-    lines.push("1. Open the post");
-    lines.push("2. React to it");
-    lines.push("3. Leave a comment");
-  }
-
-  lines.push("");
-  lines.push("Raiders done: <b>" + doneCount + "</b>");
-  lines.push("Time remaining: <b>" + remaining + " min</b>");
-
-  return lines.join("\n");
+function activeRaidKeyboard(chatId) {
+  return new InlineKeyboard()
+    .text("💬", "xcomment:" + chatId)
+    .text("🔄", "xrt:" + chatId)
+    .text("❤️", "xlike:" + chatId)
+    .text("🗒️", "xbookmark:" + chatId)
+    .text("👊", "xall:" + chatId);
 }
 
-function formatRaidStats(raid) {
-  const doneCount = raid.doneMemberIds.length;
-  const elapsed = Math.floor(((raid.endedAt || Date.now()) - raid.startedAt) / 60000);
-  const type = getRaidTypeLabel(raid.type);
+// ── Format Messages ───────────────────────────────────────────
 
-  let lines = [];
-  lines.push("RAID RESULTS");
-  lines.push("");
-  lines.push("Type: <b>" + type + "</b>");
-  lines.push("Duration: <b>" + elapsed + " min</b>");
-  lines.push("Total Raiders: <b>" + doneCount + "</b>");
-  lines.push("");
-
-  if (raid.taskStats) {
-    lines.push("<b>Task Breakdown:</b>");
-    lines.push("Likes: <b>" + (raid.taskStats.likes || 0) + "</b>");
-    lines.push("Retweets: <b>" + (raid.taskStats.retweets || 0) + "</b>");
-    lines.push("Comments: <b>" + (raid.taskStats.comments || 0) + "</b>");
-    lines.push("Follows: <b>" + (raid.taskStats.follows || 0) + "</b>");
-    lines.push("");
-  }
-
-  if (raid.doneMembers && raid.doneMembers.length > 0) {
-    lines.push("<b>Top Raiders:</b>");
-    raid.doneMembers.slice(0, 10).forEach(function(m, i) {
-      const tasks = m.tasks ? m.tasks.join(", ") : "done";
-      lines.push((i + 1) + ". " + (m.name || "Unknown") + " - " + tasks);
-    });
-  }
-
-  return lines.join("\n");
+function formatRaidOptions(link, tweetStats) {
+  const stats = tweetStats || {};
+  return (
+    "⚙️ <b>Raid Options</b>\n\n" +
+    "🔗 Link: " + link + "\n" +
+    "❤️ Likes: " + (stats.likes || 0) + "\n" +
+    "🔄 Retweets: " + (stats.retweets || 0) + "\n" +
+    "💬 Replies: " + (stats.replies || 0) + "\n" +
+    "👀 Views: " + (stats.views || 0) + "\n" +
+    "🔖 Bookmarks: " + (stats.bookmarks || 0)
+  );
 }
 
-function formatLeaderboard(chatId) {
-  const history = raidHistory[chatId] || [];
-  if (!history.length) return "No raid history yet. Start one with /raid link";
+function formatTargetsMessage(chatId) {
+  const pt = pendingTargets[chatId] || {};
+  const t = pt.targets || {};
+  return (
+    "🎯 <b>Set Raid Targets</b>\n\n" +
+    "Tap each to set your target numbers:\n\n" +
+    "❤️ Likes target: <b>" + (t.likes || 0) + "</b>\n" +
+    "🔄 Retweets target: <b>" + (t.retweets || 0) + "</b>\n" +
+    "💬 Replies target: <b>" + (t.replies || 0) + "</b>"
+  );
+}
 
-  const counts = {};
-  history.forEach(function(r) {
-    (r.doneMembers || []).forEach(function(m) {
-      if (!counts[m.userId]) counts[m.userId] = { name: m.name, raids: 0, likes: 0, retweets: 0, comments: 0, follows: 0 };
-      counts[m.userId].raids++;
-      if (m.tasks) {
-        m.tasks.forEach(function(t) {
-          if (t === "Like") counts[m.userId].likes++;
-          if (t === "Retweet") counts[m.userId].retweets++;
-          if (t === "Comment") counts[m.userId].comments++;
-          if (t === "Follow") counts[m.userId].follows++;
-        });
-      }
-    });
+function progressBar(current, target) {
+  if (!target) return "⬜⬜⬜⬜⬜";
+  const pct = Math.min(Math.floor((current / target) * 10), 10);
+  const filled = pct >= 10 ? "🟩" : pct >= 5 ? "🟨" : "🟥";
+  const empty = "⬜";
+  return filled.repeat(pct) + empty.repeat(10 - pct);
+}
+
+function formatActiveRaid(r) {
+  const t = r.targets || {};
+  const p = r.progress || {};
+  const likesPct = t.likes ? Math.floor(((p.likes || 0) / t.likes) * 100) : 0;
+  const rtPct = t.retweets ? Math.floor(((p.retweets || 0) / t.retweets) * 100) : 0;
+  const repPct = t.replies ? Math.floor(((p.replies || 0) / t.replies) * 100) : 0;
+
+  return (
+    "⚡️ <b>Raid Started!</b>\n\n" +
+    (t.likes ? "🟥 Likes " + (p.likes || 0) + " | " + t.likes + " [" + likesPct + "%]\n" : "") +
+    (t.retweets ? "🟥 Retweets " + (p.retweets || 0) + " | " + t.retweets + " [" + rtPct + "%]\n" : "") +
+    (t.replies ? "🟥 Replies " + (p.replies || 0) + " | " + t.replies + " [" + repPct + "%]\n" : "") +
+    "\n" + r.link + "\n\n" +
+    "🔥 <b>Trending</b>\n\n" +
+    "💬   🔄   ❤️   🗒️   👊\ncom  retw  like  addfld  all"
+  );
+}
+
+function formatRaidStats(r) {
+  const p = r.progress || {};
+  const elapsed = Math.floor(((r.endedAt || Date.now()) - r.startedAt) / 60000);
+  return (
+    "📊 <b>Raid Results</b>\n\n" +
+    "Duration: <b>" + elapsed + " min</b>\n" +
+    "Raiders: <b>" + r.doneMemberIds.length + "</b>\n\n" +
+    "❤️ Likes: <b>" + (p.likes || 0) + "</b>\n" +
+    "🔄 Retweets: <b>" + (p.retweets || 0) + "</b>\n" +
+    "💬 Replies: <b>" + (p.replies || 0) + "</b>\n" +
+    "🔖 Bookmarks: <b>" + (p.bookmarks || 0) + "</b>"
+  );
+}
+
+function formatLeaderboard(chatId, store) {
+  const lb = store.getLeaderboard(chatId);
+  if (!lb.length) return "No XP data yet. Start raiding!";
+  const lines = lb.slice(0, 10).map(function(entry, i) {
+    const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : (i + 1) + ".";
+    return medal + " <b>" + entry.name + "</b> — " + entry.xp + " XP";
   });
-
-  const sorted = Object.values(counts).sort(function(a, b) { return b.raids - a.raids; });
-
-  let lines = [];
-  lines.push("RAID LEADERBOARD");
-  lines.push("Total Raids: <b>" + history.length + "</b>");
-  lines.push("");
-
-  sorted.slice(0, 10).forEach(function(entry, i) {
-    lines.push((i + 1) + ". <b>" + entry.name + "</b> - " + entry.raids + " raids");
-  });
-
-  return lines.join("\n");
+  return "<b>🏆 Raid Leaderboard</b>\n\n" + lines.join("\n");
 }
 
-function startRaid(chatId, link, durationMinutes, startedBy) {
-  const type = detectRaidType(link);
+// ── Raid lifecycle ────────────────────────────────────────────
+
+function initPendingRaid(chatId, link) {
+  pendingTargets[chatId] = { link, targets: { likes: 0, retweets: 0, replies: 0 }, awaitingField: null };
+}
+
+function getPendingRaid(chatId) { return pendingTargets[chatId] || null; }
+
+function startRaid(chatId, link, targets, startedBy) {
   const r = {
-    chatId, link, type,
-    durationMinutes: durationMinutes || 30,
+    chatId, link, type: detectType(link),
+    targets: targets || {},
+    progress: { likes: 0, retweets: 0, replies: 0, bookmarks: 0 },
     startedAt: Date.now(),
     startedBy,
     doneMemberIds: [],
     doneMembers: [],
-    taskStats: { likes: 0, retweets: 0, comments: 0, follows: 0 },
     active: true,
+    awaitingComment: {},
     messageId: null,
   };
   activeRaids[chatId] = r;
+  delete pendingTargets[chatId];
   return r;
 }
 
@@ -174,34 +165,43 @@ function endRaid(chatId) {
   return r;
 }
 
-function getRaid(chatId) {
-  return activeRaids[chatId] || null;
-}
+function getRaid(chatId) { return activeRaids[chatId] || null; }
 
 function markDone(chatId, userId, userName, tasks) {
   const r = activeRaids[chatId];
   if (!r) return false;
   if (r.doneMemberIds.includes(userId)) return "already";
-
   r.doneMemberIds.push(userId);
   r.doneMembers.push({ userId, name: userName, tasks: tasks || [] });
   return true;
 }
 
-function recordTask(chatId, userId, task) {
+function recordProgress(chatId, field, amount) {
   const r = activeRaids[chatId];
   if (!r) return;
-  if (r.taskStats) r.taskStats[task] = (r.taskStats[task] || 0) + 1;
+  if (!r.progress) r.progress = {};
+  r.progress[field] = (r.progress[field] || 0) + (amount || 1);
+}
 
-  // Update member task list
-  const member = r.doneMembers.find(function(m) { return m.userId === userId; });
-  if (member) {
-    if (!member.tasks) member.tasks = [];
-    if (!member.tasks.includes(task)) member.tasks.push(task);
-  }
+// Queue
+function addToQueue(chatId, link, targets) {
+  if (!raidQueue[chatId]) raidQueue[chatId] = [];
+  raidQueue[chatId].push({ link, targets });
+}
+
+function getQueue(chatId) { return raidQueue[chatId] || []; }
+
+function clearQueue(chatId) { raidQueue[chatId] = []; }
+
+function removeFromQueue(chatId, idx) {
+  if (!raidQueue[chatId]) return;
+  raidQueue[chatId].splice(idx, 1);
 }
 
 module.exports = {
-  startRaid, endRaid, getRaid, markDone, recordTask,
-  buildRaidKeyboard, formatRaidMessage, formatRaidStats, formatLeaderboard,
+  initPendingRaid, getPendingRaid, pendingTargets,
+  startRaid, endRaid, getRaid, markDone, recordProgress,
+  raidOptionsKeyboard, targetsKeyboard, activeRaidKeyboard,
+  formatRaidOptions, formatTargetsMessage, formatActiveRaid, formatRaidStats, formatLeaderboard,
+  addToQueue, getQueue, clearQueue, removeFromQueue,
 };
