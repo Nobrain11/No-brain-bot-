@@ -15,17 +15,12 @@ function load() {
       const saved = JSON.parse(fs.readFileSync(STORE_PATH, "utf8"));
       state = Object.assign({}, state, saved);
     }
-  } catch {
-    console.warn("[NO BRAIN] store.json not found, starting fresh.");
-  }
+  } catch { console.warn("store.json not found, starting fresh."); }
 }
 
 function save() {
-  try {
-    fs.writeFileSync(STORE_PATH, JSON.stringify(state, null, 2));
-  } catch (e) {
-    console.error("[NO BRAIN] Failed to save store:", e.message);
-  }
+  try { fs.writeFileSync(STORE_PATH, JSON.stringify(state, null, 2)); }
+  catch (e) { console.error("Failed to save store:", e.message); }
 }
 
 load();
@@ -34,10 +29,7 @@ function getAllGroups() { return state.groups; }
 function getGroup(chatId) { return state.groups[chatId] || null; }
 
 function addGroup(chatId, data) {
-  if (!state.groups[chatId]) {
-    state.groups[chatId] = data;
-    save();
-  }
+  if (!state.groups[chatId]) { state.groups[chatId] = data; save(); }
 }
 
 function updateGroup(chatId, updates) {
@@ -46,10 +38,7 @@ function updateGroup(chatId, updates) {
   save();
 }
 
-function removeGroup(chatId) {
-  delete state.groups[chatId];
-  save();
-}
+function removeGroup(chatId) { delete state.groups[chatId]; save(); }
 
 function updateGroupSetting(chatId, key, value) {
   if (!state.groups[chatId]) return;
@@ -62,7 +51,7 @@ function recordGroupBuy(chatId, solSpent, buyerAddress) {
   const group = state.groups[chatId];
   if (!group) return;
   group.totalBuys = (group.totalBuys || 0) + 1;
-  group.totalVolumeSol = (group.totalVolumeSol || 0) + (solSpent || 0);
+  group.totalVolumeSol = (group.totalVolumeSol || 0) + solSpent;
   if (solSpent > (group.biggestBuy || 0)) group.biggestBuy = solSpent;
   if (buyerAddress) {
     if (!group.uniqueBuyers) group.uniqueBuyers = [];
@@ -82,10 +71,7 @@ function getGroupsForMint(mint) { return state.mintGroups[mint] || []; }
 
 function addMintGroup(mint, chatId) {
   if (!state.mintGroups[mint]) state.mintGroups[mint] = [];
-  if (!state.mintGroups[mint].includes(chatId)) {
-    state.mintGroups[mint].push(chatId);
-    save();
-  }
+  if (!state.mintGroups[mint].includes(chatId)) { state.mintGroups[mint].push(chatId); save(); }
 }
 
 function removeMintGroup(mint, chatId) {
@@ -101,12 +87,44 @@ function setWalletLastAlert(key) {
   state.walletCooldowns[key] = Date.now();
   const keys = Object.keys(state.walletCooldowns);
   if (keys.length > 10000) {
-    const oldest = keys.sort(function(a, b) {
-      return state.walletCooldowns[a] - state.walletCooldowns[b];
-    }).slice(0, 2000);
+    const oldest = keys.sort(function(a, b) { return state.walletCooldowns[a] - state.walletCooldowns[b]; }).slice(0, 2000);
     oldest.forEach(function(k) { delete state.walletCooldowns[k]; });
   }
   save();
+}
+
+// XP system
+function getXP(chatId, userId) {
+  const group = state.groups[chatId];
+  if (!group || !group.xp) return 0;
+  return group.xp[userId] || 0;
+}
+
+function addXP(chatId, userId, userName, amount) {
+  if (!state.groups[chatId]) return;
+  if (!state.groups[chatId].xp) state.groups[chatId].xp = {};
+  if (!state.groups[chatId].xpNames) state.groups[chatId].xpNames = {};
+  state.groups[chatId].xp[userId] = (state.groups[chatId].xp[userId] || 0) + amount;
+  state.groups[chatId].xpNames[userId] = userName;
+  save();
+}
+
+function getLeaderboard(chatId) {
+  const group = state.groups[chatId];
+  if (!group || !group.xp) return [];
+  const xp = group.xp;
+  const names = group.xpNames || {};
+  return Object.keys(xp)
+    .map(function(uid) { return { userId: uid, name: names[uid] || "Unknown", xp: xp[uid] }; })
+    .sort(function(a, b) { return b.xp - a.xp; });
+}
+
+function resetLeaderboard(chatId) {
+  if (state.groups[chatId]) {
+    state.groups[chatId].xp = {};
+    state.groups[chatId].xpNames = {};
+    save();
+  }
 }
 
 module.exports = {
@@ -114,4 +132,5 @@ module.exports = {
   updateGroupSetting, recordGroupBuy, recordMilestone,
   getGroupsForMint, addMintGroup, removeMintGroup,
   getWalletLastAlert, setWalletLastAlert,
+  getXP, addXP, getLeaderboard, resetLeaderboard,
 };
